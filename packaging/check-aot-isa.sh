@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Confirm a Native AOT x64 binary actually contains AVX2 or AVX-512 codegen.
-# Usage: check-aot-isa.sh <binary> <avx2|avx512>
+# Confirm a Native AOT binary actually contains the requested codegen.
+# Usage: check-aot-isa.sh <binary> <avx2|avx512|apple-m1>
 # avx2 requires ymm and vfmadd and no zmm. avx512 requires zmm.
+# apple-m1 requires AdvSimd float ops (.4s / fmla / fadd).
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
-  echo "usage: check-aot-isa.sh <binary> <avx2|avx512>" >&2
+  echo "usage: check-aot-isa.sh <binary> <avx2|avx512|apple-m1>" >&2
   exit 2
 fi
 
@@ -17,9 +18,9 @@ if [ ! -f "$binary" ]; then
 fi
 
 case "$isa" in
-  avx2|avx512) ;;
+  avx2|avx512|apple-m1) ;;
   *)
-    echo "isa must be avx2 or avx512" >&2
+    echo "isa must be avx2, avx512, or apple-m1" >&2
     exit 2
     ;;
 esac
@@ -96,12 +97,13 @@ disassemble | awk '
     if (line ~ /ymm/) ymm++
     if (line ~ /zmm/) zmm++
     if (line ~ /vfmadd/) fma++
+    if (line ~ /\.4s/ || line ~ /fmla/ || line ~ /fadd/) neon++
   }
-  END { printf "%d %d %d\n", ymm + 0, zmm + 0, fma + 0 }
+  END { printf "%d %d %d %d\n", ymm + 0, zmm + 0, fma + 0, neon + 0 }
 ' > "$tmp"
 
-read -r ymm zmm fma < "$tmp"
-echo "isa-check ${isa}: ymm=${ymm} zmm=${zmm} vfmadd=${fma} binary=${binary}"
+read -r ymm zmm fma neon < "$tmp"
+echo "isa-check ${isa}: ymm=${ymm} zmm=${zmm} vfmadd=${fma} neon=${neon} binary=${binary}"
 
 case "$isa" in
   avx2)
@@ -113,6 +115,12 @@ case "$isa" in
   avx512)
     if [ "$zmm" -lt 100 ]; then
       echo "avx512 Native AOT binary does not contain enough zmm instructions" >&2
+      exit 1
+    fi
+    ;;
+  apple-m1)
+    if [ "$neon" -lt 50 ]; then
+      echo "apple-m1 Native AOT binary does not contain enough AdvSimd float ops" >&2
       exit 1
     fi
     ;;

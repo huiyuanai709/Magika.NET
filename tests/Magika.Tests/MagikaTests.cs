@@ -230,6 +230,160 @@ public class MagikaTests
     }
 
     [Fact]
+    public void Softmax_MatchesMathFOnFiniteLogits()
+    {
+        var random = new Random(3);
+        foreach (int length in new[] { 1, 3, 4, 6, 8, 15, 16, 17, 31, 32, 214 })
+        {
+            float[] logits = new float[length];
+            for (int i = 0; i < length; i++)
+            {
+                logits[i] = (float)((random.NextDouble() * 40) - 20);
+            }
+
+            logits[0] = 0f;
+            if (length > 2)
+            {
+                logits[1] = -80f;
+                logits[2] = 12f;
+            }
+
+            float[] actual = new float[length];
+            logits.AsSpan().CopyTo(actual);
+            Onnx.SimdMath.Softmax(actual, actual);
+            float[] expected = ScalarSoftmax(logits);
+            float max = 0f;
+            int argActual = 0;
+            int argExpected = 0;
+            for (int i = 0; i < length; i++)
+            {
+                max = MathF.Max(max, MathF.Abs(expected[i] - actual[i]));
+                if (actual[i] > actual[argActual])
+                {
+                    argActual = i;
+                }
+
+                if (expected[i] > expected[argExpected])
+                {
+                    argExpected = i;
+                }
+            }
+
+            Assert.Equal(argExpected, argActual);
+            Assert.True(max <= 5e-5f, $"length {length} max abs diff {max:R}");
+            float sum = 0f;
+            for (int i = 0; i < length; i++)
+            {
+                sum += actual[i];
+            }
+
+            Assert.Equal(1f, sum, precision: 5);
+        }
+    }
+
+    [Fact]
+    public void Softmax_NonFiniteMatchesScalar()
+    {
+        float[] negative = [-float.PositiveInfinity, -float.PositiveInfinity, 1f, 2f];
+        float[] withNaN = [1f, float.NaN, 3f, 4f];
+        AssertSoftmaxExact(negative);
+        AssertSoftmaxExact(withNaN);
+    }
+
+    [Fact]
+    public void FeatureWiden_MatchesScalarOracle()
+    {
+        ModelDefinition model = ModelDefinition.LoadDefault();
+        var random = new Random(5);
+        foreach (int length in new[] { 0, 1, 7, 8, 15, 16, 17, 31, 32, 100, 1024, 4096 })
+        {
+            byte[] data = new byte[length];
+            random.NextBytes(data);
+            if (length > 4)
+            {
+                data[0] = (byte)' ';
+                data[1] = (byte)'\n';
+                data[^1] = (byte)'\t';
+            }
+
+            int[] actual = FeatureExtractor.Extract(data, model);
+            int[] expected = ScalarExtract(data, model);
+            Assert.Equal(expected, actual);
+            ushort[] compact = new ushort[model.FeaturesSize];
+            ushort[] compactExpected = new ushort[model.FeaturesSize];
+            int block = Math.Min(model.BlockSize, data.Length);
+            ReadOnlySpan<byte> prefix = data.Length == 0 ? [] : data.AsSpan(0, block);
+            ReadOnlySpan<byte> suffix = data.Length == 0 ? [] : data.AsSpan(data.Length - block, block);
+            FeatureExtractor.ExtractBlocks(prefix, suffix, model, compact);
+            ScalarExtract(prefix, suffix, model, compactExpected);
+            Assert.Equal(compactExpected, compact);
+            Assert.Equal(FeatureExtractor.HasEnoughContent(actual, model), FeatureExtractor.HasModelPrefix(prefix, model));
+        }
+    }
+
+    [Fact]
+    public async Task LargeFile_EndReadsMatchWholeBuffer()
+    {
+        MagikaSession session = MagikaSession.Create();
+        byte[] pdf = File.ReadAllBytes(Fixture("pdf.bin"));
+        byte[] data = new byte[200_000];
+        pdf.CopyTo(data.AsSpan(0, pdf.Length));
+        pdf.CopyTo(data.AsSpan(data.Length - pdf.Length, pdf.Length));
+        for (int i = pdf.Length; i < data.Length - pdf.Length; i++)
+        {
+            data[i] = (byte)(i * 17);
+        }
+
+        MagikaResult fromBytes = session.Identify(data);
+        string directory = Path.Combine(Path.GetTempPath(), "magika-large-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, "large.bin");
+        await File.WriteAllBytesAsync(path, data);
+        try
+        {
+            MagikaResult fromPath = session.IdentifyPath(path);
+            MagikaResult fromAsyncPath = await session.IdentifyPathAsync(path);
+            MagikaResult fromSeekable = session.Identify(new MemoryStream(data));
+            MagikaResult fromSeekableAsync = await session.IdentifyAsync(new MemoryStream(data));
+            using ChunkedStream forward = new(data, chunk: 1000);
+            MagikaResult fromForward = session.Identify(forward);
+            using ChunkedStream forwardAsync = new(data, chunk: 3);
+            MagikaResult fromForwardAsync = await session.IdentifyAsync(forwardAsync);
+            AssertSame(fromBytes, fromPath, "path");
+            AssertSame(fromBytes, fromAsyncPath, "async path");
+            AssertSame(fromBytes, fromSeekable, "seekable");
+            AssertSame(fromBytes, fromSeekableAsync, "seekable async");
+            AssertSame(fromBytes, fromForward, "forward");
+            AssertSame(fromBytes, fromForwardAsync, "forward async");
+            Assert.Equal(fromBytes.Score, fromPath.Score);
+            Assert.Equal(fromBytes.Score, fromForward.Score);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LargeFile_ShortPrefixSkipsSuffixAndModel()
+    {
+        MagikaSession session = MagikaSession.Create();
+        byte[] data = new byte[20_000];
+        data.AsSpan(0, 4096).Fill((byte)' ');
+        data.AsSpan(4096).Fill((byte)'Z');
+        MagikaResult fromBytes = session.Identify(data);
+        Assert.Equal("txt", fromBytes.ContentType.Label);
+        Assert.Equal(1f, fromBytes.Score);
+        Assert.Null(fromBytes.ModelContentType);
+
+        using var guarded = new SuffixGuardStream(data, guard: 4096);
+        MagikaResult fromStream = session.Identify(guarded);
+        Assert.Equal("txt", fromStream.ContentType.Label);
+        Assert.Equal(1f, fromStream.Score);
+        Assert.True(guarded.Position <= 4096);
+    }
+
+    [Fact]
     public void Model_IsFusedAndMatchesOnnxRuntime()
     {
         MagikaSession session = MagikaSession.Create();
@@ -986,5 +1140,154 @@ public class MagikaTests
         float[] scores = new float[model.TrainingLabels.Length];
         scores[Array.IndexOf(model.TrainingLabels, label)] = score;
         return scores;
+    }
+
+    private static float[] ScalarSoftmax(ReadOnlySpan<float> logits)
+    {
+        float max = float.NegativeInfinity;
+        for (int i = 0; i < logits.Length; i++)
+        {
+            max = MathF.Max(max, logits[i]);
+        }
+
+        if (float.IsNegativeInfinity(max))
+        {
+            max = 0f;
+        }
+
+        float[] dest = new float[logits.Length];
+        float sum = 0f;
+        for (int i = 0; i < logits.Length; i++)
+        {
+            dest[i] = MathF.Exp(logits[i] - max);
+            sum += dest[i];
+        }
+
+        float inv = 1f / sum;
+        for (int i = 0; i < dest.Length; i++)
+        {
+            dest[i] *= inv;
+        }
+
+        return dest;
+    }
+
+    private static void AssertSoftmaxExact(float[] logits)
+    {
+        float[] actual = logits.ToArray();
+        Onnx.SimdMath.Softmax(actual, actual);
+        float[] expected = ScalarSoftmax(logits);
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++)
+        {
+            if (float.IsNaN(expected[i]))
+            {
+                Assert.True(float.IsNaN(actual[i]), $"index {i}");
+            }
+            else
+            {
+                Assert.Equal(expected[i], actual[i]);
+            }
+        }
+    }
+
+    private static int[] ScalarExtract(byte[] data, ModelDefinition model)
+    {
+        int block = Math.Min(model.BlockSize, data.Length);
+        ReadOnlySpan<byte> prefix = data.AsSpan(0, block);
+        ReadOnlySpan<byte> suffix = data.AsSpan(data.Length - block, block);
+        int[] features = new int[model.FeaturesSize];
+        ScalarExtract(prefix, suffix, model, features);
+        return features;
+    }
+
+    private static void ScalarExtract(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, ModelDefinition model, Span<int> features)
+    {
+        ReadOnlySpan<byte> beg = StripStart(prefix);
+        ReadOnlySpan<byte> end = StripEnd(suffix);
+        features.Fill(model.PaddingToken);
+        int begCopy = Math.Min(model.BegSize, beg.Length);
+        for (int i = 0; i < begCopy; i++)
+        {
+            features[i] = beg[i];
+        }
+
+        int endCopy = Math.Min(model.EndSize, end.Length);
+        int dest = model.BegSize + model.EndSize - endCopy;
+        int src = end.Length - endCopy;
+        for (int i = 0; i < endCopy; i++)
+        {
+            features[dest + i] = end[src + i];
+        }
+    }
+
+    private static void ScalarExtract(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, ModelDefinition model, Span<ushort> features)
+    {
+        ReadOnlySpan<byte> beg = StripStart(prefix);
+        ReadOnlySpan<byte> end = StripEnd(suffix);
+        features.Fill((ushort)model.PaddingToken);
+        int begCopy = Math.Min(model.BegSize, beg.Length);
+        for (int i = 0; i < begCopy; i++)
+        {
+            features[i] = beg[i];
+        }
+
+        int endCopy = Math.Min(model.EndSize, end.Length);
+        int dest = model.BegSize + model.EndSize - endCopy;
+        int src = end.Length - endCopy;
+        for (int i = 0; i < endCopy; i++)
+        {
+            features[dest + i] = (ushort)end[src + i];
+        }
+    }
+
+    private static ReadOnlySpan<byte> StripStart(ReadOnlySpan<byte> data)
+    {
+        int i = 0;
+        while (i < data.Length && IsFeatureWhitespace(data[i]))
+        {
+            i++;
+        }
+
+        return data[i..];
+    }
+
+    private static ReadOnlySpan<byte> StripEnd(ReadOnlySpan<byte> data)
+    {
+        int i = data.Length;
+        while (i > 0 && IsFeatureWhitespace(data[i - 1]))
+        {
+            i--;
+        }
+
+        return data[..i];
+    }
+
+    private static bool IsFeatureWhitespace(byte value) =>
+        value is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or 0x0C or 0x0B;
+
+    private sealed class SuffixGuardStream : MemoryStream
+    {
+        private readonly long _guard;
+
+        public SuffixGuardStream(byte[] data, long guard)
+            : base(data)
+        {
+            _guard = guard;
+        }
+
+        public override long Position
+        {
+            get => base.Position;
+            set
+            {
+                if (value > _guard)
+                {
+                    throw new InvalidOperationException($"suffix was read at {value}");
+                }
+
+                base.Position = value;
+            }
+        }
     }
 }

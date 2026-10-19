@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Run a published Native AOT binary when this CPU can execute it.
-# x64 builds are also disassembled for ymm (avx2) or zmm (avx512).
-# Usage: smoke-aot.sh <binary> <avx2|avx512|> <fixture>
+# x64 builds are disassembled for ymm (avx2) or zmm (avx512).
+# osx-arm64 is disassembled for AdvSimd (.4s / fmla / fadd).
+# Usage: smoke-aot.sh <binary> <avx2|avx512|apple-m1|> <fixture>
 set -euo pipefail
 
 if [ "$#" -ne 3 ]; then
-  echo "usage: smoke-aot.sh <binary> <avx2|avx512|> <fixture>" >&2
+  echo "usage: smoke-aot.sh <binary> <avx2|avx512|apple-m1|> <fixture>" >&2
   exit 2
 fi
 
@@ -21,6 +22,13 @@ fi
 host_has_isa() {
   case "$1" in
     "") return 0 ;;
+    apple-m1)
+      case "$(uname -m)" in
+        arm64|aarch64) return 0 ;;
+      esac
+      echo "host is not arm64; skipping execution of ${binary}" >&2
+      return 1
+      ;;
     avx2|avx512) ;;
     *)
       echo "unknown isa: $1" >&2

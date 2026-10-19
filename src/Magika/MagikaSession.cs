@@ -1,3 +1,4 @@
+using System.Buffers;
 using Microsoft.Win32.SafeHandles;
 
 namespace Magika;
@@ -96,8 +97,7 @@ public sealed partial class MagikaSession
                 return Heuristic(path, "empty", score: 1f);
             }
 
-            using ContentEnds.Window ends = ContentEnds.ReadSeekable(stream, length, _model.BlockSize);
-            return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
+            return IdentifySeekable(stream, length, path);
         }
         finally
         {
@@ -140,8 +140,7 @@ public sealed partial class MagikaSession
                 return Heuristic(path, "empty", score: 1f);
             }
 
-            using ContentEnds.Lease ends = await ContentEnds.ReadSeekableAsync(stream, length, _model.BlockSize, cancellationToken).ConfigureAwait(false);
-            return IdentifyLease(ends, length, path);
+            return await IdentifySeekableAsync(stream, length, path, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -158,16 +157,15 @@ public sealed partial class MagikaSession
             return special;
         }
 
-        // pread of the head and tail. A mapped view was slower for the 4 KiB block.
-        using SafeFileHandle handle = File.OpenHandle(path);
+        // Two preads. A mapped view of the 4 KiB ends was slower. RandomAccess asks the OS not to readahead the whole file.
+        using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
         long length = RandomAccess.GetLength(handle);
         if (length == 0)
         {
             return Heuristic(path, "empty", score: 1f);
         }
 
-        using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, _model.BlockSize);
-        return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
+        return IdentifyHandle(handle, length, path);
     }
 
     /// <summary>
@@ -278,19 +276,94 @@ public sealed partial class MagikaSession
             return Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f);
         }
 
-        int[] features = FeatureExtractor.ExtractBlocks(prefix, suffix, _model);
-        if (!FeatureExtractor.HasEnoughContent(features, _model))
+        if (!FeatureExtractor.HasModelPrefix(prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f);
         }
 
-        float[] scores;
-        lock (_gate)
+        int width = _model.FeaturesSize;
+        int[] rented = ArrayPool<int>.Shared.Rent(width);
+        try
         {
-            scores = _session.Run(features, batch: 1, features.Length, _model.PaddingToken);
+            Span<int> features = rented.AsSpan(0, width);
+            FeatureExtractor.ExtractBlocks(prefix, suffix, _model, features);
+            if (!FeatureExtractor.HasEnoughContent(features, _model))
+            {
+                return Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f);
+            }
+
+            float[] scores;
+            lock (_gate)
+            {
+                scores = _session.Run(features, batch: 1, features.Length, _model.PaddingToken);
+            }
+
+            return DecideScores(scores, path);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(rented);
+        }
+    }
+
+    private MagikaResult IdentifyHandle(SafeFileHandle handle, long length, string? path)
+    {
+        int blockSize = _model.BlockSize;
+        if (length <= (long)blockSize * 2)
+        {
+            using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, blockSize);
+            return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
         }
 
-        return DecideScores(scores, path);
+        int block = blockSize;
+        using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
+        if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+        {
+            return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
+        }
+
+        using ContentEnds.Window tail = ContentEnds.ReadAt(handle, length - block, block);
+        return IdentifyBlocks(head.Prefix, tail.Prefix, length, path);
+    }
+
+    private MagikaResult IdentifySeekable(Stream stream, long length, string? path)
+    {
+        int blockSize = _model.BlockSize;
+        if (length <= (long)blockSize * 2)
+        {
+            using ContentEnds.Window ends = ContentEnds.ReadSeekable(stream, length, blockSize);
+            return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
+        }
+
+        int block = blockSize;
+        using ContentEnds.Window head = ContentEnds.ReadStreamAt(stream, offset: 0, block);
+        if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+        {
+            return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
+        }
+
+        using ContentEnds.Window tail = ContentEnds.ReadStreamAt(stream, length - block, block);
+        return IdentifyBlocks(head.Prefix, tail.Prefix, length, path);
+    }
+
+    private async Task<MagikaResult> IdentifySeekableAsync(Stream stream, long length, string? path, CancellationToken cancellationToken)
+    {
+        int blockSize = _model.BlockSize;
+        if (length <= (long)blockSize * 2)
+        {
+            using ContentEnds.Lease ends = await ContentEnds.ReadSeekableAsync(stream, length, blockSize, cancellationToken).ConfigureAwait(false);
+            return IdentifyLease(ends, length, path);
+        }
+
+        int block = blockSize;
+        using ContentEnds.Lease head = await ContentEnds.ReadStreamAtAsync(stream, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+        {
+            return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
+        }
+
+        using ContentEnds.Lease tail = await ContentEnds.ReadStreamAtAsync(stream, length - block, block, length, cancellationToken).ConfigureAwait(false);
+        return IdentifyBlocks(head.Prefix, tail.Prefix, length, path);
     }
 
     private MagikaResult IdentifyLease(ContentEnds.Lease ends, long length, string? path) =>
@@ -299,15 +372,34 @@ public sealed partial class MagikaSession
     private async Task<MagikaResult> IdentifyFileAsync(string path, CancellationToken cancellationToken)
     {
         // Overlapped IO where the OS supports it. The window matches the sync pread path.
-        using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+        using SafeFileHandle handle = File.OpenHandle(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            FileOptions.Asynchronous | FileOptions.RandomAccess);
         long length = RandomAccess.GetLength(handle);
         if (length == 0)
         {
             return Heuristic(path, "empty", score: 1f);
         }
 
-        using ContentEnds.Lease ends = await ContentEnds.ReadHandleAsync(handle, length, _model.BlockSize, cancellationToken).ConfigureAwait(false);
-        return IdentifyLease(ends, length, path);
+        int blockSize = _model.BlockSize;
+        if (length <= (long)blockSize * 2)
+        {
+            using ContentEnds.Lease ends = await ContentEnds.ReadHandleAsync(handle, length, blockSize, cancellationToken).ConfigureAwait(false);
+            return IdentifyLease(ends, length, path);
+        }
+
+        int block = blockSize;
+        using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+        {
+            return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
+        }
+
+        using ContentEnds.Lease tail = await ContentEnds.ReadAtAsync(handle, length - block, block, length, cancellationToken).ConfigureAwait(false);
+        return IdentifyBlocks(head.Prefix, tail.Prefix, length, path);
     }
 
     private MagikaResult? ClassifySpecialPath(string path)
