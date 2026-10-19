@@ -49,7 +49,7 @@ dotnet run --project src/Magika.Cli -c Release -- sample.pdf
 dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
 ```
 
-文本输出是 `路径: 标签 分数 MIME 分组`。`--version` 打印库版本和模型名。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
+文本输出是 `路径: 标签 分数 MIME 分组`。`--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
 
 发布包里的程序，Linux 和 macOS 是 `./magika`，Windows 是 `magika.exe`。用法写在每个 zip 的 `RUN.txt` 里。
 
@@ -74,6 +74,8 @@ dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode mediu
 | `magika-<tag>-win-x64.zip` | `windows-latest` |
 
 每个 zip 里有二进制、`RUN.txt`、`LICENSE`、`THIRD-PARTY-NOTICES.md` 和 `VERSION.txt`。
+
+这些 Native AOT 二进制使用 [Satori GC](https://www.nuget.org/packages/PublishWithSatoriGC/11.0.0-satori.38707303131.1)（MIT，.NET Foundation）。`src/Magika.Cli` 引用 `PublishWithSatoriGC` SDK，版本钉在 `11.0.0-satori.38707303131.1`。`UseSatoriGC` 保持 SDK 默认值 `true`，因此 CLI 的自包含或 `PublishAot` 发布会换上 Satori。`dotnet pack` 仍然打出框架依赖的 `PackAsTool` 包；Satori 只用于自包含的 Native AOT 发布 zip，不进入该工具包。
 
 ## 开发
 

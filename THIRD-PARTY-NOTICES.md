@@ -12,6 +12,15 @@ The embedded `standard_v3_3` files `model.onnx`, `config.min.json`, and `metadat
 
 Magika.NET does not include the upstream `magika-rules` / YARA rule engine.
 
+## Satori GC
+
+- Package: https://www.nuget.org/packages/PublishWithSatoriGC/11.0.0-satori.38707303131.1
+- Project: https://github.com/VSadov/Satori
+- License: MIT License
+- Copyright: Copyright (c) .NET Foundation and Contributors
+
+Native AOT release builds of `Magika.Cli` publish with Satori GC through the `PublishWithSatoriGC` SDK (`11.0.0-satori.38707303131.1`). The SDK and its runtime packs are not vendored in this repository. The framework-dependent `PackAsTool` package does not include them. The MIT license text is the license distributed with that NuGet package.
+
 ## SimdPaddleOCR (design reference)
 
 - Project: https://github.com/sdcb/SimdPaddleOCR
