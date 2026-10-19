@@ -64,13 +64,13 @@ internal static class OnnxOps
 
     internal static OnnxTensor ShapeOf(OnnxTensor data)
     {
-        long[] dims = new long[data.Rank];
+        long[] dims = OnnxScratch.RentLong(data.Rank);
         for (int i = 0; i < dims.Length; i++)
         {
             dims[i] = data.Shape[i];
         }
 
-        return OnnxTensor.Int64([dims.Length], dims);
+        return OnnxScratch.Int64([dims.Length], dims);
     }
 
     internal static OnnxTensor Cast(OnnxTensor data, int to)
@@ -93,7 +93,7 @@ internal static class OnnxOps
         {
             case OnnxDType.Float:
             {
-                float[] dest = new float[n];
+                float[] dest = OnnxScratch.RentFloat(n);
                 for (int i = 0; i < n; i++)
                 {
                     dest[i] = data.DType switch
@@ -105,11 +105,11 @@ internal static class OnnxOps
                     };
                 }
 
-                return OnnxTensor.Float(data.Shape.ToArray(), dest);
+                return OnnxScratch.Float(data.Shape, dest);
             }
             case OnnxDType.Int32:
             {
-                int[] dest = new int[n];
+                int[] dest = OnnxScratch.RentInt(n);
                 for (int i = 0; i < n; i++)
                 {
                     dest[i] = data.DType switch
@@ -121,11 +121,11 @@ internal static class OnnxOps
                     };
                 }
 
-                return OnnxTensor.Int32(data.Shape.ToArray(), dest);
+                return OnnxScratch.Int32(data.Shape, dest);
             }
             case OnnxDType.Int64:
             {
-                long[] dest = new long[n];
+                long[] dest = OnnxScratch.RentLong(n);
                 for (int i = 0; i < n; i++)
                 {
                     dest[i] = data.DType switch
@@ -137,7 +137,7 @@ internal static class OnnxOps
                     };
                 }
 
-                return OnnxTensor.Int64(data.Shape.ToArray(), dest);
+                return OnnxScratch.Int64(data.Shape, dest);
             }
             default:
                 throw new NotSupportedException($"Cast from {data.DType} to {dtype} is not supported.");
@@ -306,9 +306,9 @@ internal static class OnnxOps
         int[] outStrides = Strides(outShape);
         return data.DType switch
         {
-            OnnxDType.Float => Gather(data.Floats!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxTensor.Float),
-            OnnxDType.Int32 => Gather(data.Ints!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxTensor.Int32),
-            OnnxDType.Int64 => Gather(data.Longs!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxTensor.Int64),
+            OnnxDType.Float => Gather(data.Floats!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxScratch.Float),
+            OnnxDType.Int32 => Gather(data.Ints!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxScratch.Int32),
+            OnnxDType.Int64 => Gather(data.Longs!, n, outShape, outStrides, inStrides, normStart, normStep, OnnxScratch.Int64),
             _ => throw new NotSupportedException($"Slice of {data.DType} is not supported."),
         };
     }
@@ -331,10 +331,10 @@ internal static class OnnxOps
 
         return data.DType switch
         {
-            OnnxDType.Float => OnnxTensor.Float(shape, BroadcastCopy(data.Floats!, data.Shape, shape)),
-            OnnxDType.Int32 => OnnxTensor.Int32(shape, BroadcastCopy(data.Ints!, data.Shape, shape)),
-            OnnxDType.Int64 => OnnxTensor.Int64(shape, BroadcastCopy(data.Longs!, data.Shape, shape)),
-            OnnxDType.Bool => OnnxTensor.Bool(shape, BroadcastCopy(data.Bools!, data.Shape, shape)),
+            OnnxDType.Float => OnnxScratch.Float(shape, BroadcastCopy(data.Floats!, data.Shape, shape)),
+            OnnxDType.Int32 => OnnxScratch.Int32(shape, BroadcastCopy(data.Ints!, data.Shape, shape)),
+            OnnxDType.Int64 => OnnxScratch.Int64(shape, BroadcastCopy(data.Longs!, data.Shape, shape)),
+            OnnxDType.Bool => OnnxScratch.Bool(shape, BroadcastCopy(data.Bools!, data.Shape, shape)),
             _ => throw new NotSupportedException($"Expand of {data.DType} is not supported."),
         };
     }
@@ -343,7 +343,7 @@ internal static class OnnxOps
     {
         int[] shape = BroadcastShape(a.Shape, b.Shape);
         int n = OnnxTensor.ElementCount(shape);
-        byte[] dest = new byte[n];
+        byte[] dest = OnnxScratch.RentBool(n);
         int[] strideA = BroadcastStrides(a.Shape, shape);
         int[] strideB = BroadcastStrides(b.Shape, shape);
         Span<int> coord = shape.Length <= 8 ? stackalloc int[shape.Length] : new int[shape.Length];
@@ -355,7 +355,7 @@ internal static class OnnxOps
             Increment(coord, shape);
         }
 
-        return OnnxTensor.Bool(shape, dest);
+        return OnnxScratch.Bool(shape, dest);
     }
 
     internal static OnnxTensor Binary(OnnxTensor a, OnnxTensor b, FloatOp op)
@@ -367,13 +367,13 @@ internal static class OnnxOps
 
         int[] shape = BroadcastShape(a.Shape, b.Shape);
         int n = OnnxTensor.ElementCount(shape);
-        float[] dest = GC.AllocateUninitializedArray<float>(n);
+        float[] dest = OnnxScratch.RentFloat(n);
         int[] strideA = BroadcastStrides(a.Shape, shape);
         int[] strideB = BroadcastStrides(b.Shape, shape);
         if (TryContiguousBinary(a, b, dest, op) ||
             (shape.Length > 0 && n > 0 && TryVectorBinary(a.Floats!, b.Floats!, dest, shape, strideA, strideB, op)))
         {
-            return OnnxTensor.Float(shape, dest);
+            return OnnxScratch.Float(shape, dest);
         }
 
         Span<int> coord = shape.Length <= 8 ? stackalloc int[shape.Length] : new int[shape.Length];
@@ -385,7 +385,7 @@ internal static class OnnxOps
             Increment(coord, shape);
         }
 
-        return OnnxTensor.Float(shape, dest);
+        return OnnxScratch.Float(shape, dest);
     }
 
     internal static OnnxTensor Tanh(OnnxTensor data)
@@ -396,9 +396,9 @@ internal static class OnnxOps
         }
 
         float[] source = data.Floats!;
-        float[] dest = GC.AllocateUninitializedArray<float>(source.Length);
+        float[] dest = OnnxScratch.RentFloat(source.Length);
         SimdMath.Tanh(source, dest);
-        return OnnxTensor.Float(data.Shape.ToArray(), dest);
+        return OnnxScratch.Float(data.Shape, dest);
     }
 
     internal static OnnxTensor UnaryFloat(OnnxTensor data, FloatUnary op)
@@ -409,13 +409,13 @@ internal static class OnnxOps
         }
 
         float[] source = data.Floats!;
-        float[] dest = GC.AllocateUninitializedArray<float>(source.Length);
+        float[] dest = OnnxScratch.RentFloat(source.Length);
         for (int i = 0; i < source.Length; i++)
         {
             dest[i] = op(source[i]);
         }
 
-        return OnnxTensor.Float(data.Shape.ToArray(), dest);
+        return OnnxScratch.Float(data.Shape, dest);
     }
 
     internal static OnnxTensor Reduce(OnnxTensor data, int[] axes, bool keepDims, bool max, bool noopEmpty)
@@ -466,14 +466,18 @@ internal static class OnnxOps
         int[] outShape = shape.ToArray();
         if (data.Floats is not null && TryFastReduce(data.Floats, data.Shape, reduced, keepDims, max, out float[]? fast))
         {
-            return OnnxTensor.Float(outShape, fast);
+            return OnnxScratch.Float(outShape, fast);
         }
 
         int n = OnnxTensor.ElementCount(outShape);
-        float[] acc = new float[n];
+        float[] acc = OnnxScratch.RentFloat(n);
         if (max)
         {
             Array.Fill(acc, float.NegativeInfinity);
+        }
+        else
+        {
+            Array.Clear(acc);
         }
 
         int[] inStrides = Strides(data.Shape);
@@ -502,7 +506,7 @@ internal static class OnnxOps
             Increment(coord, data.Shape);
         }
 
-        return OnnxTensor.Float(outShape, acc);
+        return OnnxScratch.Float(outShape, acc);
     }
 
     internal static OnnxTensor GlobalMaxPool(OnnxTensor data)
@@ -595,10 +599,10 @@ internal static class OnnxOps
         int[] inStrides = Strides(data.Shape);
         int[] outStrides = Strides(shape);
         float[] source = data.Floats!;
-        float[] dest = GC.AllocateUninitializedArray<float>(n);
+        float[] dest = OnnxScratch.RentFloat(n);
         if (TryTransposeLastSingleton(data.Shape, perm, source, dest))
         {
-            return OnnxTensor.Float(shape, dest);
+            return OnnxScratch.Float(shape, dest);
         }
 
         int rank = shape.Length;
@@ -615,7 +619,7 @@ internal static class OnnxOps
             Increment(coord, shape);
         }
 
-        return OnnxTensor.Float(shape, dest);
+        return OnnxScratch.Float(shape, dest);
     }
 
     internal static OnnxTensor MatMul(OnnxTensor a, OnnxTensor b)
@@ -636,9 +640,9 @@ internal static class OnnxOps
         int rows = a.Length / k;
         int[] shape = a.Shape.ToArray();
         shape[^1] = n;
-        float[] dest = GC.AllocateUninitializedArray<float>(rows * n);
+        float[] dest = OnnxScratch.RentFloat(rows * n);
         SimdGemm.Multiply(a.Floats!, b.Floats!, dest, rows, k, n);
-        return OnnxTensor.Float(shape, dest);
+        return OnnxScratch.Float(shape, dest);
     }
 
     internal static OnnxTensor Embedding(OnnxTensor tokens, OnnxTensor weight)
@@ -662,7 +666,7 @@ internal static class OnnxOps
         int[] shape = new int[seq.Length + 1];
         seq.CopyTo(shape, 0);
         shape[^1] = dim;
-        float[] dest = GC.AllocateUninitializedArray<float>(positions * dim);
+        float[] dest = OnnxScratch.RentFloat(positions * dim);
         float[] table = weight.Floats!;
         for (int i = 0; i < positions; i++)
         {
@@ -675,7 +679,7 @@ internal static class OnnxOps
             table.AsSpan(id * dim, dim).CopyTo(dest.AsSpan(i * dim, dim));
         }
 
-        return OnnxTensor.Float(shape, dest);
+        return OnnxScratch.Float(shape, dest);
     }
 
     internal static OnnxTensor Conv(OnnxTensor input, OnnxTensor weight, int[] strides, int[] pads, int[] dilations, int group)
@@ -721,7 +725,7 @@ internal static class OnnxOps
 
         int spatial = outH * outW;
         int depth = channels * kH * kW;
-        float[] dest = GC.AllocateUninitializedArray<float>(batch * filters * spatial);
+        float[] dest = OnnxScratch.RentFloat(batch * filters * spatial);
         float[] source = input.Floats!;
         int colCount = depth * spatial;
         float[] column = ArrayPool<float>.Shared.Rent(colCount);
@@ -738,7 +742,7 @@ internal static class OnnxOps
             ArrayPool<float>.Shared.Return(column);
         }
 
-        return OnnxTensor.Float([batch, filters, outH, outW], dest);
+        return OnnxScratch.Float([batch, filters, outH, outW], dest);
     }
 
     private static void Im2Col(
@@ -815,23 +819,23 @@ internal static class OnnxOps
 
     private static OnnxTensor ConcatFloat(ReadOnlySpan<OnnxTensor> inputs, int[] shape, int axis, int outer, int inner)
     {
-        float[] dest = new float[OnnxTensor.ElementCount(shape)];
+        float[] dest = OnnxScratch.RentFloat(OnnxTensor.ElementCount(shape));
         CopyConcat(inputs, dest, axis, outer, inner, static (t, i) => t.Floats![i], static (d, i, v) => d[i] = v);
-        return OnnxTensor.Float(shape, dest);
+        return OnnxScratch.Float(shape, dest);
     }
 
     private static OnnxTensor ConcatInt32(ReadOnlySpan<OnnxTensor> inputs, int[] shape, int axis, int outer, int inner)
     {
-        int[] dest = new int[OnnxTensor.ElementCount(shape)];
+        int[] dest = OnnxScratch.RentInt(OnnxTensor.ElementCount(shape));
         CopyConcat(inputs, dest, axis, outer, inner, static (t, i) => t.Ints![i], static (d, i, v) => d[i] = v);
-        return OnnxTensor.Int32(shape, dest);
+        return OnnxScratch.Int32(shape, dest);
     }
 
     private static OnnxTensor ConcatInt64(ReadOnlySpan<OnnxTensor> inputs, int[] shape, int axis, int outer, int inner)
     {
-        long[] dest = new long[OnnxTensor.ElementCount(shape)];
+        long[] dest = OnnxScratch.RentLong(OnnxTensor.ElementCount(shape));
         CopyConcat(inputs, dest, axis, outer, inner, static (t, i) => t.Longs![i], static (d, i, v) => d[i] = v);
-        return OnnxTensor.Int64(shape, dest);
+        return OnnxScratch.Int64(shape, dest);
     }
 
     private static void CopyConcat<T>(
@@ -875,7 +879,7 @@ internal static class OnnxOps
         int[] step,
         TensorFactory<T> factory)
     {
-        T[] dest = new T[n];
+        T[] dest = OnnxScratch.Rent<T>(n);
         int rank = outShape.Length;
         Span<int> coord = rank <= 8 ? stackalloc int[rank] : new int[rank];
         for (int i = 0; i < n; i++)
@@ -895,20 +899,41 @@ internal static class OnnxOps
 
     private static OnnxTensor Copy(OnnxTensor data, int[] shape)
     {
-        return data.DType switch
+        switch (data.DType)
         {
-            OnnxDType.Float => OnnxTensor.Float(shape, (float[])data.Floats!.Clone()),
-            OnnxDType.Int32 => OnnxTensor.Int32(shape, (int[])data.Ints!.Clone()),
-            OnnxDType.Int64 => OnnxTensor.Int64(shape, (long[])data.Longs!.Clone()),
-            OnnxDType.Bool => OnnxTensor.Bool(shape, (byte[])data.Bools!.Clone()),
-            _ => throw new NotSupportedException($"Cannot copy {data.DType}."),
-        };
+            case OnnxDType.Float:
+            {
+                float[] floats = OnnxScratch.RentFloat(data.Length);
+                data.Floats!.AsSpan().CopyTo(floats);
+                return OnnxScratch.Float(shape, floats);
+            }
+            case OnnxDType.Int32:
+            {
+                int[] ints = OnnxScratch.RentInt(data.Length);
+                data.Ints!.AsSpan().CopyTo(ints);
+                return OnnxScratch.Int32(shape, ints);
+            }
+            case OnnxDType.Int64:
+            {
+                long[] longs = OnnxScratch.RentLong(data.Length);
+                data.Longs!.AsSpan().CopyTo(longs);
+                return OnnxScratch.Int64(shape, longs);
+            }
+            case OnnxDType.Bool:
+            {
+                byte[] bools = OnnxScratch.RentBool(data.Length);
+                data.Bools!.AsSpan().CopyTo(bools);
+                return OnnxScratch.Bool(shape, bools);
+            }
+            default:
+                throw new NotSupportedException($"Cannot copy {data.DType}.");
+        }
     }
 
     private static T[] BroadcastCopy<T>(T[] source, int[] inputShape, int[] outShape)
     {
         int n = OnnxTensor.ElementCount(outShape);
-        T[] dest = new T[n];
+        T[] dest = OnnxScratch.Rent<T>(n);
         int[] strides = BroadcastStrides(inputShape, outShape);
         Span<int> coord = outShape.Length <= 8 ? stackalloc int[outShape.Length] : new int[outShape.Length];
         for (int i = 0; i < n; i++)
@@ -1312,7 +1337,7 @@ internal static class OnnxOps
             inner *= shape[i];
         }
 
-        dest = new float[Math.Max(1, outer * inner)];
+        dest = OnnxScratch.RentFloat(Math.Max(1, outer * inner));
         if (inner == 1)
         {
             for (int o = 0; o < outer; o++)

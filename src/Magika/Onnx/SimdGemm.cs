@@ -16,6 +16,13 @@ internal static class SimdGemm
 {
     private const int LargeWork = 200_000;
 
+    /// <summary>
+    /// Caps GEMM parallelism on the calling thread. <c>0</c> uses every processor.
+    /// Read before work is split, so pool threads do not consult it.
+    /// </summary>
+    [ThreadStatic]
+    internal static int ThreadBudget;
+
     internal static void Multiply(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> c, int m, int k, int n)
     {
         if (a.Length < (long)m * k || b.Length < (long)k * n || c.Length < (long)m * n)
@@ -166,6 +173,11 @@ internal static class SimdGemm
     private static int ChooseThreads(int units)
     {
         int threads = Environment.ProcessorCount;
+        if (ThreadBudget > 0)
+        {
+            threads = Math.Min(threads, ThreadBudget);
+        }
+
         if (units < 2 || threads < 2)
         {
             return 1;

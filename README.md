@@ -24,6 +24,8 @@ Console.WriteLine(result.Score);
 
 `IdentifyAsync` and `IdentifyPathAsync` take a `CancellationToken` and read those same prefix and suffix windows. Paths use `RandomAccess.ReadAsync`. The library and CLI compile async methods with runtime async (`<Features>$(Features);runtime-async=on</Features>`). Cancellation stops the read; the ONNX run itself is synchronous.
 
+`IdentifyPaths` and `IdentifyPathsAsync` keep input order. They read many paths at once, then score the feature rows in batches (`MagikaOptions.BatchSize`, default 8) on a pool of managed sessions (`InferenceWorkers`). `IdentifyFeatures` and `IdentifyFeaturesBatch` score vectors you already extracted (2048 integers per row for this model). One session is safe to share across threads: single-file calls take one lane, and the multi-file APIs use the pool. The pool is created on the first multi-file call. Lanes share the model weights and keep separate activation scratch. A lane runs one forward pass at a time. With `InferenceWorkers` left at 0, the pool size is the processor count, and each lane's convolution uses an even share of those processors.
+
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
 {
@@ -47,9 +49,12 @@ The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the c
 ```bash
 dotnet run --project src/Magika.Cli -c Release -- sample.pdf
 dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./files/*
 ```
 
-Text output is `path: label score mime group`. `--version` prints the library version and the model name. A binary published with Satori GC adds a second line, `gc: satori`. Exit code `1` means a file could not be read. Exit code `2` means the arguments were invalid.
+Text output is `path: label score mime group`, in the same order as the arguments. One path uses `IdentifyPathAsync`. Several paths are read concurrently and scored with `IdentifyPathsAsync`. `--batch-size` (default 8, range 1..64) is how many feature rows share a forward pass. `--workers` (default 0) is the inference pool: one lane per processor. An explicit count is used as given. Each lane is a managed session over the same weights. Extra lanes split the convolution's thread budget. This stays on the managed interpreter.
+
+`--version` prints the library version and the model name. A binary published with Satori GC adds a second line, `gc: satori`. Exit code `1` means a file could not be read. Exit code `2` means the arguments were invalid.
 
 A release binary is `./magika` on Linux and macOS, and `magika.exe` on Windows. See `RUN.txt` inside each zip.
 
@@ -62,6 +67,8 @@ Input tokens follow upstream Magika: up to 4096 bytes from the start and from th
 ## Inference
 
 The graph runs in-process (`src/Magika/Onnx`). x64 uses handwritten AVX-512 and AVX2/FMA kernels. Other CPUs, including Apple Silicon, use `System.Numerics.Vector<float>`. Those managed kernels are inspired by [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR).
+
+`OnnxSession.Run` evaluates a real batch (the leading dimension is the row count). A session keeps the immutable initializers in one dictionary and reuses activation buffers for the same shapes, so a warm run does not allocate those tensors again. The returned probabilities are a copy, so the next run can reuse the output buffer. There is still no Microsoft.ML.OnnxRuntime dependency.
 
 ## Releases
 

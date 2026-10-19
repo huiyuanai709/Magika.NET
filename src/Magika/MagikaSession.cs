@@ -5,19 +5,29 @@ namespace Magika;
 /// <summary>
 /// Identifies file content types with the bundled Magika <c>standard_v3_3</c> model.
 /// A session is safe to use from multiple threads.
+/// Single-file calls share one inference lane and run one evaluation at a time.
+/// <see cref="IdentifyPaths"/> and <see cref="IdentifyPathsAsync"/> read files concurrently,
+/// then score feature rows in batches on a pool of lanes (<see cref="MagikaOptions.InferenceWorkers"/>).
+/// Lanes share model weights and do not share activation scratch. One lane is still only entered by one run at a time.
 /// </summary>
-public sealed class MagikaSession
+public sealed partial class MagikaSession
 {
     private readonly ModelDefinition _model;
     private readonly Onnx.OnnxSession _session;
     private readonly MagikaOptions _options;
-    private readonly Lock _gate = new();
+    private readonly Lock _gate;
+    private readonly int _workerCount;
+    private readonly int _gemmThreadsPerLane;
+    private InferenceLane[]? _pool;
 
-    private MagikaSession(ModelDefinition model, Onnx.OnnxSession session, MagikaOptions options)
+    private MagikaSession(ModelDefinition model, Onnx.OnnxSession session, MagikaOptions options, int workers)
     {
         _model = model;
         _session = session;
         _options = options;
+        _gate = new Lock();
+        _workerCount = workers;
+        _gemmThreadsPerLane = workers <= 1 ? 0 : Math.Max(1, Environment.ProcessorCount / workers);
     }
 
     /// <summary>Bundled model name. Currently <c>standard_v3_3</c>.</summary>
@@ -33,12 +43,22 @@ public sealed class MagikaSession
     public static MagikaSession Create(MagikaOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.BatchSize is < 1 or > 64)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), options.BatchSize, "BatchSize must be from 1 to 64.");
+        }
+
+        if (options.InferenceWorkers < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), options.InferenceWorkers, "InferenceWorkers must be at least 0. 0 uses one lane per processor.");
+        }
+
         ModelDefinition model = ModelDefinition.LoadDefault();
         using Stream stream = ModelDefinition.OpenModel();
         using MemoryStream copy = new();
         stream.CopyTo(copy);
         Onnx.OnnxSession session = Onnx.OnnxSession.Load(copy.GetBuffer().AsSpan(0, (int)copy.Length));
-        return new MagikaSession(model, session, options);
+        return new MagikaSession(model, session, options, ResolveWorkers(options.InferenceWorkers));
     }
 
     /// <summary>Identifies a buffer.</summary>
@@ -185,7 +205,20 @@ public sealed class MagikaSession
         }
     }
 
-    internal MagikaResult DecideScores(float[] scores, string? path = null)
+    internal float[] ScorePacked(ReadOnlySpan<int> features, int batch)
+    {
+        if (batch <= 0 || features.Length != batch * _model.FeaturesSize)
+        {
+            throw new ArgumentException("Feature buffer does not match the batch.", nameof(features));
+        }
+
+        lock (_gate)
+        {
+            return _session.Run(features, batch, _model.FeaturesSize);
+        }
+    }
+
+    internal MagikaResult DecideScores(ReadOnlySpan<float> scores, string? path = null)
     {
         ModelDecision decision = PostProcessor.Decide(_model, _options.PredictionMode, scores);
         return new MagikaResult(
