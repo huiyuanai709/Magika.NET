@@ -207,16 +207,19 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          isa_arg=()
+          # bash 3.2 (macOS /bin/bash) errors on "${empty[@]}" under set -u.
+          # Keep this array non-empty and append ISA only for avx2/avx512.
+          cmd=(
+            ./packaging/stage-release.sh
+            "$RID"
+            "$TAG"
+            "artifacts/$SKU"
+            "artifacts/release/magika-${TAG}-${SKU}.zip"
+          )
           if [ -n "$ISA" ] && [ "$ISA" != "none" ]; then
-            isa_arg=("$ISA")
+            cmd+=("$ISA")
           fi
-          ./packaging/stage-release.sh \
-            "$RID" \
-            "$TAG" \
-            "artifacts/$SKU" \
-            "artifacts/release/magika-${TAG}-${SKU}.zip" \
-            "${isa_arg[@]}"
+          "${cmd[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
