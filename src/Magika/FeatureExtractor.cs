@@ -20,6 +20,32 @@ internal static class FeatureExtractor
         return features;
     }
 
+    internal static void ExtractBlocks(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, ModelDefinition model, Span<ushort> features)
+    {
+        if (features.Length != model.FeaturesSize)
+        {
+            throw new ArgumentException("Feature buffer length does not match the model.", nameof(features));
+        }
+
+        ReadOnlySpan<byte> beg = StripStart(prefix);
+        ReadOnlySpan<byte> end = StripEnd(suffix);
+        features.Fill((ushort)model.PaddingToken);
+
+        int begCopy = Math.Min(model.BegSize, beg.Length);
+        for (int i = 0; i < begCopy; i++)
+        {
+            features[i] = beg[i];
+        }
+
+        int endCopy = Math.Min(model.EndSize, end.Length);
+        int dest = model.BegSize + model.EndSize - endCopy;
+        int src = end.Length - endCopy;
+        for (int i = 0; i < endCopy; i++)
+        {
+            features[dest + i] = end[src + i];
+        }
+    }
+
     internal static void ExtractBlocks(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, ModelDefinition model, Span<int> features)
     {
         if (features.Length != model.FeaturesSize)
@@ -49,6 +75,10 @@ internal static class FeatureExtractor
     internal static bool HasEnoughContent(ReadOnlySpan<int> features, ModelDefinition model) =>
         (uint)(model.MinFileSizeForDl - 1) < (uint)features.Length
         && features[model.MinFileSizeForDl - 1] != model.PaddingToken;
+
+    internal static bool HasEnoughContent(ReadOnlySpan<ushort> features, ModelDefinition model) =>
+        (uint)(model.MinFileSizeForDl - 1) < (uint)features.Length
+        && features[model.MinFileSizeForDl - 1] != (ushort)model.PaddingToken;
 
     internal static string ClassifySmall(ReadOnlySpan<byte> prefix, long fileLength)
     {

@@ -6,8 +6,8 @@ namespace Magika;
 /// Identifies file content types with the bundled Magika <c>standard_v3_3</c> model.
 /// A session is safe to use from multiple threads.
 /// Single-file calls share one inference lane and run one evaluation at a time.
-/// <see cref="IdentifyPaths"/> and <see cref="IdentifyPathsAsync"/> read files concurrently,
-/// then score feature rows in batches on a pool of lanes (<see cref="MagikaOptions.InferenceWorkers"/>).
+/// <see cref="IdentifyPaths"/> and <see cref="IdentifyPathsAsync"/> read files in windows of 64
+/// so scoring can overlap the next read, then score feature rows in batches on a pool of lanes (<see cref="MagikaOptions.InferenceWorkers"/>).
 /// Lanes share model weights and do not share activation scratch. One lane is still only entered by one run at a time.
 /// </summary>
 public sealed partial class MagikaSession

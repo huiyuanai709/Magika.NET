@@ -59,6 +59,23 @@ internal sealed class OnnxSession
         return RunInterpreted(tokens, batch, sequence);
     }
 
+    internal float[] RunCompact(ReadOnlySpan<ushort> tokens, int batch, int sequence, int paddingToken = -1)
+    {
+        if (_v33State is not null && sequence == StandardV33Model.Sequence)
+        {
+            OutputWidth = StandardV33Model.Classes;
+            return _v33State.Evaluate(tokens, batch, paddingToken);
+        }
+
+        int[] widened = new int[tokens.Length];
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            widened[i] = tokens[i];
+        }
+
+        return RunInterpreted(widened, batch, sequence);
+    }
+
     internal float[] RunInterpreted(ReadOnlySpan<int> tokens, int batch, int sequence)
     {
         if (batch <= 0 || sequence <= 0 || tokens.Length != batch * sequence)
