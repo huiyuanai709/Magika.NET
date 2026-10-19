@@ -2,6 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Magika</RootNamespace>
     <AssemblyName>Magika</AssemblyName>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsAotCompatible>true</IsAotCompatible>
     <Description>AI file content-type detection for .NET. Managed ONNX inference with no native runtime.</Description>
     <PackageId>Magika.NET</PackageId>
