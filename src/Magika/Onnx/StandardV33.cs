@@ -168,9 +168,10 @@ internal sealed class StandardV33Model
 
         int nr = Avx512F.IsSupported ? 32 : Avx2.IsSupported && Fma.IsSupported ? 16 : 0;
         float[] packedA = nr == 0 ? [] : PackA(convWeight);
-        PackPadTables(convWeight, embed, embedBias, geluCubic, geluScale, geluOne, geluHalf, out float[] padAct, out float[] padWeight, out float[] weightSum);
+        float[] fused = FuseEmbed(embed, embedBias, geluCubic, geluScale, geluOne, geluHalf);
+        PackPadTables(convWeight, fused, out float[] padAct, out float[] padWeight, out float[] weightSum);
         return new StandardV33Model(
-            embed,
+            fused,
             embedBias,
             ln0Gamma,
             ln0Beta,
@@ -296,30 +297,35 @@ internal sealed class StandardV33Model
         return packed;
     }
 
+    private static float[] FuseEmbed(float[] embed, float[] bias, float cubic, float scale, float one, float half)
+    {
+        float[] fused = GC.AllocateUninitializedArray<float>(Vocab * EmbedDim);
+        for (int token = 0; token < Vocab; token++)
+        {
+            int offset = token * EmbedDim;
+            for (int d = 0; d < EmbedDim; d++)
+            {
+                fused[offset + d] = embed[offset + d] + bias[d];
+            }
+
+            SimdMath.Gelu(fused.AsSpan(offset, EmbedDim), cubic, scale, one, half);
+        }
+
+        return fused;
+    }
+
     private static void PackPadTables(
         float[] weight,
-        float[] embed,
-        float[] embedBias,
-        float cubic,
-        float scale,
-        float one,
-        float half,
+        float[] fusedEmbed,
         out float[] padAct,
         out float[] padWeight,
         out float[] weightSum)
     {
-        float[] row = new float[EmbedDim];
-        int pad = PadToken * EmbedDim;
-        for (int d = 0; d < EmbedDim; d++)
-        {
-            row[d] = embed[pad + d] + embedBias[d];
-        }
-
-        SimdMath.Gelu(row, cubic, scale, one, half);
         padAct = new float[Channels];
+        int pad = PadToken * EmbedDim;
         for (int c = 0; c < Channels; c++)
         {
-            padAct[c] = row[c % EmbedDim];
+            padAct[c] = fusedEmbed[pad + (c % EmbedDim)];
         }
 
         padWeight = new float[Channels * Kernel * Filters];
@@ -350,7 +356,6 @@ internal sealed class StandardV33Session
     private int _batch;
     private int _threads;
     private int _capacity;
-    private int[] _tokens = [];
     private float[] _act = [];
     private float[] _conv = [];
     private float[] _packedB = [];
@@ -457,13 +462,12 @@ internal sealed class StandardV33Session
         }
 
         Ensure(batch);
-        tokens.CopyTo(_tokens);
         _batch = batch;
         bool shortcut = false;
         for (int sample = 0; sample < batch; sample++)
         {
-            EmbedAndNormalize(sample);
-            bool sparse = IsPadShortcut(sample, paddingToken);
+            EmbedAndNormalize(tokens, sample);
+            bool sparse = IsPadShortcut(tokens, sample, paddingToken);
             _shortcut[sample] = sparse ? (byte)1 : (byte)0;
             if (sparse)
             {
@@ -488,7 +492,7 @@ internal sealed class StandardV33Session
         }
         else
         {
-            ConvolveShortcutBatch();
+            ConvolveShortcutBatch(tokens);
         }
 
         // GELU is monotonic, so max(gelu(conv + bias)) == gelu(max(conv) + bias).
@@ -512,7 +516,6 @@ internal sealed class StandardV33Session
         }
 
         int act = batch * StandardV33Model.Groups * StandardV33Model.Channels;
-        _tokens = new int[batch * StandardV33Model.Sequence];
         _act = GC.AllocateUninitializedArray<float>(act);
         _conv = GC.AllocateUninitializedArray<float>(act);
         _pooled = GC.AllocateUninitializedArray<float>(batch * StandardV33Model.Filters);
@@ -536,30 +539,23 @@ internal sealed class StandardV33Session
         _capacity = batch;
     }
 
-    private unsafe void EmbedAndNormalize(int sample)
+    private unsafe void EmbedAndNormalize(ReadOnlySpan<int> tokens, int sample)
     {
         int sequence = StandardV33Model.Sequence;
         int dim = StandardV33Model.EmbedDim;
+        ReadOnlySpan<int> row = tokens.Slice(sample * sequence, sequence);
         fixed (float* actBase = _act)
         fixed (float* table = _model.Embed)
-        fixed (float* bias = _model.EmbedBias)
-        fixed (int* tokenBase = _tokens)
+        fixed (int* tokenBase = &MemoryMarshal.GetReference(row))
         {
             float* act = actBase + (sample * StandardV33Model.Groups * StandardV33Model.Channels);
-            int* tokens = tokenBase + (sample * sequence);
-            EmbedRows(tokens, act, table, bias, sequence, dim);
+            EmbedRows(tokenBase, act, table, sequence, dim);
         }
 
-        SimdMath.Gelu(
-            _act.AsSpan(sample * sequence * dim, sequence * dim),
-            _model.GeluCubic,
-            _model.GeluScale,
-            _model.GeluOne,
-            _model.GeluHalf);
         LayerNorm0(sample);
     }
 
-    private static unsafe void EmbedRows(int* tokens, float* act, float* table, float* bias, int sequence, int dim)
+    private static unsafe void EmbedRows(int* tokens, float* act, float* table, int sequence, int dim)
     {
         for (int i = 0; i < sequence; i++)
         {
@@ -575,23 +571,21 @@ internal sealed class StandardV33Session
             {
                 for (int d = 0; d < dim; d += 16)
                 {
-                    Vector512<float> value = Avx512F.Add(Avx512F.LoadVector512(src + d), Avx512F.LoadVector512(bias + d));
-                    Avx512F.Store(dst + d, value);
+                    Avx512F.Store(dst + d, Avx512F.LoadVector512(src + d));
                 }
             }
             else if (Avx2.IsSupported)
             {
                 for (int d = 0; d < dim; d += 8)
                 {
-                    Vector256<float> value = Avx.Add(Avx.LoadVector256(src + d), Avx.LoadVector256(bias + d));
-                    Avx.Store(dst + d, value);
+                    Avx.Store(dst + d, Avx.LoadVector256(src + d));
                 }
             }
             else
             {
                 for (int d = 0; d < dim; d++)
                 {
-                    dst[d] = src[d] + bias[d];
+                    dst[d] = src[d];
                 }
             }
         }
@@ -791,7 +785,7 @@ internal sealed class StandardV33Session
     /// factors into a per-channel scale, so a pure 5-tap window is five multiply-adds per filter
     /// instead of the full 1280-wide product. Content windows still use the GEMM.
     /// </summary>
-    private void ConvolveShortcutBatch()
+    private void ConvolveShortcutBatch(ReadOnlySpan<int> tokens)
     {
         Span<int> rangeStart = stackalloc int[StandardV33Model.OutH];
         Span<int> rangeEnd = stackalloc int[StandardV33Model.OutH];
@@ -817,7 +811,7 @@ internal sealed class StandardV33Session
                 continue;
             }
 
-            CollectPadWindows(sample, _activeOh, out int activeCount, rangeStart, rangeEnd, out int rangeCount);
+            CollectPadWindows(tokens, sample, _activeOh, out int activeCount, rangeStart, rangeEnd, out int rangeCount);
             FillAnalytic(sample, rangeStart, rangeEnd, rangeCount);
             if (activeCount == 0)
             {
@@ -847,7 +841,7 @@ internal sealed class StandardV33Session
         }
     }
 
-    private bool IsPadShortcut(int sample, int paddingToken)
+    private bool IsPadShortcut(ReadOnlySpan<int> tokens, int sample, int paddingToken)
     {
         if (paddingToken != StandardV33Model.PadToken)
         {
@@ -860,7 +854,7 @@ internal sealed class StandardV33Session
         int origin = sample * StandardV33Model.Sequence;
         for (int i = 0; i < StandardV33Model.Sequence; i++)
         {
-            if (_tokens[origin + i] == paddingToken)
+            if (tokens[origin + i] == paddingToken)
             {
                 pads++;
             }
@@ -871,22 +865,23 @@ internal sealed class StandardV33Session
             return false;
         }
 
-        return CountPureWindows(sample, paddingToken) >= StandardV33Model.MinPureWindows;
+        return CountPureWindows(tokens, sample, paddingToken) >= StandardV33Model.MinPureWindows;
     }
 
-    private int CountPureWindows(int sample, int paddingToken)
+    private int CountPureWindows(ReadOnlySpan<int> tokens, int sample, int paddingToken)
     {
         Span<int> active = stackalloc int[StandardV33Model.OutH];
         Span<int> rangeStart = stackalloc int[StandardV33Model.OutH];
         Span<int> rangeEnd = stackalloc int[StandardV33Model.OutH];
-        CollectPadWindows(sample, active, out _, rangeStart, rangeEnd, out _, paddingToken, out int pure);
+        CollectPadWindows(tokens, sample, active, out _, rangeStart, rangeEnd, out _, paddingToken, out int pure);
         return pure;
     }
 
-    private void CollectPadWindows(int sample, Span<int> active, out int activeCount, Span<int> rangeStart, Span<int> rangeEnd, out int rangeCount) =>
-        CollectPadWindows(sample, active, out activeCount, rangeStart, rangeEnd, out rangeCount, StandardV33Model.PadToken, out _);
+    private void CollectPadWindows(ReadOnlySpan<int> tokens, int sample, Span<int> active, out int activeCount, Span<int> rangeStart, Span<int> rangeEnd, out int rangeCount) =>
+        CollectPadWindows(tokens, sample, active, out activeCount, rangeStart, rangeEnd, out rangeCount, StandardV33Model.PadToken, out _);
 
     private void CollectPadWindows(
+        ReadOnlySpan<int> tokens,
         int sample,
         Span<int> active,
         out int activeCount,
@@ -907,10 +902,10 @@ internal sealed class StandardV33Session
         for (int g = 0; g < groups; g++)
         {
             int t = origin + (g * step);
-            pure[g] = _tokens[t] == paddingToken
-                && _tokens[t + 1] == paddingToken
-                && _tokens[t + 2] == paddingToken
-                && _tokens[t + 3] == paddingToken
+            pure[g] = tokens[t] == paddingToken
+                && tokens[t + 1] == paddingToken
+                && tokens[t + 2] == paddingToken
+                && tokens[t + 3] == paddingToken
                 ? (byte)1
                 : (byte)0;
         }
