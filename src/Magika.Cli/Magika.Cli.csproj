@@ -16,4 +16,37 @@
   <ItemGroup>
     <ProjectReference Include="..\Magika\Magika.csproj" />
   </ItemGroup>
+
+  <!-- Native AOT folds X86.IsSupported into a constant. Without an instruction set,
+       linux-x64 and win-x64 publish as SSE and the AVX2 / AVX-512 kernels are removed.
+       MagikaIsa is avx2 or avx512. It is applied here, not as a comma-separated
+       -p:IlcInstructionSet list (MSBuild splits property values on commas).
+       x64 PublishAot defaults to avx2. osx-arm64 is unchanged. -->
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and $([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))">
+    <_MagikaIsa Condition="'$(MagikaIsa)' == ''">avx2</_MagikaIsa>
+    <_MagikaIsa Condition="'$(MagikaIsa)' != ''">$(MagikaIsa)</_MagikaIsa>
+    <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx2'">avx2</IlcInstructionSet>
+    <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx512'">avx512</IlcInstructionSet>
+    <!-- System.Numerics.Vector stays 256-bit on x64 unless this is set.
+         Explicit Vector512 kernels do not need it. AVX2 SKUs leave the default width alone. -->
+    <IlcMaxVectorTBitWidth Condition="'$(_MagikaIsa)' == 'avx512'">512</IlcMaxVectorTBitWidth>
+  </PropertyGroup>
+
+  <Target Name="ValidateMagikaIsa" BeforeTargets="PrepareForBuild;Build;Publish;IlcCompile;WriteIlcRspFileForCompilation"
+          Condition="'$(PublishAot)' == 'true'">
+    <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64')) and '$(_MagikaIsa)' != 'avx2' and '$(_MagikaIsa)' != 'avx512'"
+           Text="MagikaIsa must be avx2 or avx512 for Native AOT x64. The project sets IlcInstructionSet from MagikaIsa." />
+    <Error Condition="'$(MagikaIsa)' != '' and !$([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))"
+           Text="MagikaIsa applies only to Native AOT linux-x64 and win-x64." />
+  </Target>
+
+  <Target Name="ApplyMagikaInstructionSet" BeforeTargets="WriteIlcRspFileForCompilation;IlcCompile"
+          Condition="'$(PublishAot)' == 'true' and $([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))">
+    <PropertyGroup>
+      <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx2'">avx2</IlcInstructionSet>
+      <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx512'">avx512</IlcInstructionSet>
+      <IlcMaxVectorTBitWidth Condition="'$(_MagikaIsa)' == 'avx512'">512</IlcMaxVectorTBitWidth>
+    </PropertyGroup>
+    <Message Importance="high" Text="Native AOT IlcInstructionSet=$(IlcInstructionSet) IlcMaxVectorTBitWidth=$(IlcMaxVectorTBitWidth) for $(RuntimeIdentifier)." />
+  </Target>
 </Project>

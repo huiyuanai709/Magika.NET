@@ -72,7 +72,7 @@ jobs:
           done
 
   publish:
-    name: Publish ${{ matrix.rid }}
+    name: Publish ${{ matrix.sku }}
     needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -81,13 +81,29 @@ jobs:
       matrix:
         include:
           # windows-latest already has the VS C++ toolset Native AOT links with.
+          # x64 SKUs are separate binaries. Native AOT constant-folds IsSupported,
+          # so one zip cannot contain both the AVX2 and AVX-512 kernels.
           - os: windows-latest
             rid: win-x64
+            isa: avx2
+            sku: win-x64-avx2
+          - os: windows-latest
+            rid: win-x64
+            isa: avx512
+            sku: win-x64-avx512
           - os: ubuntu-latest
             rid: linux-x64
+            isa: avx2
+            sku: linux-x64-avx2
+          - os: ubuntu-latest
+            rid: linux-x64
+            isa: avx512
+            sku: linux-x64-avx512
           # macos-latest is Apple Silicon. osx-arm64 Native AOT links with the macOS SDK.
           - os: macos-latest
             rid: osx-arm64
+            isa: none
+            sku: osx-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -118,57 +134,40 @@ jobs:
         shell: bash
         env:
           RID: ${{ matrix.rid }}
+          ISA: ${{ matrix.isa }}
+          SKU: ${{ matrix.sku }}
           VERSION: ${{ needs.version.outputs.version }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          dotnet publish src/Magika.Cli/Magika.Cli.csproj \
-            --configuration Release \
-            --runtime "$RID" \
-            --self-contained true \
-            -p:PublishAot=true \
-            -p:Version="$VERSION" \
-            -p:InformationalVersion="$TAG" \
-            -p:IncludeSourceRevisionInInformationalVersion=false \
-            -p:DebugType=none \
-            -p:DebugSymbols=false \
-            -p:NativeDebugSymbols=false \
-            --output "artifacts/$RID"
-          if find "artifacts/$RID" \( -iname '*.pdb' -o -iname '*.dbg' \) | grep -q .; then
+          args=(
+            dotnet publish src/Magika.Cli/Magika.Cli.csproj
+            --configuration Release
+            --runtime "$RID"
+            --self-contained true
+            -p:PublishAot=true
+            -p:Version="$VERSION"
+            -p:InformationalVersion="$TAG"
+            -p:IncludeSourceRevisionInInformationalVersion=false
+            -p:DebugType=none
+            -p:DebugSymbols=false
+            -p:NativeDebugSymbols=false
+            --output "artifacts/$SKU"
+          )
+          # MagikaIsa is a single token. Do not pass IlcInstructionSet as a comma list;
+          # MSBuild splits -p values on commas. The project maps avx2 to IlcInstructionSet=avx2
+          # and avx512 to IlcInstructionSet=avx512 plus IlcMaxVectorTBitWidth=512.
+          if [ -n "$ISA" ] && [ "$ISA" != "none" ]; then
+            args+=(-p:MagikaIsa="$ISA")
+          fi
+          "${args[@]}"
+          if find "artifacts/$SKU" \( -iname '*.pdb' -o -iname '*.dbg' \) | grep -q .; then
             echo "publish directory contains debug symbols" >&2
             exit 1
           fi
 
-      - name: Smoke the published binary (linux-x64)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          bin=artifacts/linux-x64/Magika.Cli
-          "$bin" --version
-          "$bin" --help
-          out="$("$bin" tests/Magika.Tests/Fixtures/pdf.bin)"
-          echo "$out"
-          label="${out#*: }"
-          label="${label%% *}"
-          if [ "$label" != "pdf" ]; then
-            echo "linux-x64 binary did not classify the PDF fixture as pdf" >&2
-            exit 1
-          fi
-
-      - name: Smoke the published binary (win-x64)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $bin = "./artifacts/win-x64/Magika.Cli.exe"
-          & $bin --version
-          & $bin --help
-          $out = & $bin "tests/Magika.Tests/Fixtures/pdf.bin"
-          Write-Host $out
-          if ($out -notmatch ": pdf\s") { throw "win-x64 binary did not classify the PDF fixture as pdf" }
-
-      - name: Smoke the published binary (osx-arm64)
-        if: runner.os == 'macOS'
+      - name: Sign the Apple Silicon binary
+        if: matrix.rid == 'osx-arm64'
         shell: bash
         run: |
           set -euo pipefail
@@ -178,33 +177,50 @@ jobs:
             codesign --force --sign - "$bin"
           fi
           file "$bin" | grep -Eq 'arm64|ARM64'
-          "$bin" --version
-          "$bin" --help
-          out="$("$bin" tests/Magika.Tests/Fixtures/pdf.bin)"
-          echo "$out"
-          label="${out#*: }"
-          label="${label%% *}"
-          if [ "$label" != "pdf" ]; then
-            echo "osx-arm64 binary did not classify the PDF fixture as pdf" >&2
-            exit 1
+
+      - name: Smoke the published binary
+        shell: bash
+        env:
+          RID: ${{ matrix.rid }}
+          ISA: ${{ matrix.isa }}
+          SKU: ${{ matrix.sku }}
+        run: |
+          set -euo pipefail
+          if [ "$RID" = "win-x64" ]; then
+            bin="artifacts/${SKU}/Magika.Cli.exe"
+          else
+            bin="artifacts/${SKU}/Magika.Cli"
+            chmod +x "$bin"
           fi
+          isa="$ISA"
+          if [ "$isa" = "none" ]; then
+            isa=""
+          fi
+          ./packaging/smoke-aot.sh "$bin" "$isa" tests/Magika.Tests/Fixtures/pdf.bin
 
       - name: Pack the release zip
         shell: bash
         env:
           RID: ${{ matrix.rid }}
+          ISA: ${{ matrix.isa }}
+          SKU: ${{ matrix.sku }}
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
+          isa_arg=()
+          if [ -n "$ISA" ] && [ "$ISA" != "none" ]; then
+            isa_arg=("$ISA")
+          fi
           ./packaging/stage-release.sh \
             "$RID" \
             "$TAG" \
-            "artifacts/$RID" \
-            "artifacts/release/magika-${TAG}-${RID}.zip"
+            "artifacts/$SKU" \
+            "artifacts/release/magika-${TAG}-${SKU}.zip" \
+            "${isa_arg[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: magika-${{ matrix.rid }}
+          name: magika-${{ matrix.sku }}
           path: artifacts/release/*.zip
           if-no-files-found: error
           retention-days: 14
@@ -232,15 +248,19 @@ jobs:
           TAG: ${{ needs.version.outputs.tag }}
         run: |
           set -euo pipefail
-          linux="magika-${TAG}-linux-x64.zip"
-          mac="magika-${TAG}-osx-arm64.zip"
-          windows="magika-${TAG}-win-x64.zip"
-          test -f "dist/$linux"
-          test -f "dist/$mac"
-          test -f "dist/$windows"
+          files=(
+            "magika-${TAG}-linux-x64-avx2.zip"
+            "magika-${TAG}-linux-x64-avx512.zip"
+            "magika-${TAG}-win-x64-avx2.zip"
+            "magika-${TAG}-win-x64-avx512.zip"
+            "magika-${TAG}-osx-arm64.zip"
+          )
+          for file in "${files[@]}"; do
+            test -f "dist/$file"
+          done
           (
             cd dist
-            sha256sum "$linux" "$mac" "$windows" > SHA256SUMS.txt
+            sha256sum "${files[@]}" > SHA256SUMS.txt
           )
           ./packaging/release-notes.sh "$TAG" > dist/notes.md
 
@@ -253,9 +273,11 @@ jobs:
         run: |
           set -euo pipefail
           assets=(
-            "dist/magika-${TAG}-linux-x64.zip"
+            "dist/magika-${TAG}-linux-x64-avx2.zip"
+            "dist/magika-${TAG}-linux-x64-avx512.zip"
+            "dist/magika-${TAG}-win-x64-avx2.zip"
+            "dist/magika-${TAG}-win-x64-avx512.zip"
             "dist/magika-${TAG}-osx-arm64.zip"
-            "dist/magika-${TAG}-win-x64.zip"
             dist/SHA256SUMS.txt
           )
           if gh release view "$TAG" >/dev/null 2>&1; then

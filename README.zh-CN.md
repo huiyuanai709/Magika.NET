@@ -66,7 +66,7 @@ dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./f
 
 ## 推理
 
-图在进程内执行（`src/Magika/Onnx`）。x64 使用手写的 AVX-512 和 AVX2/FMA 内核。其它 CPU（包括 Apple Silicon）使用 `System.Numerics.Vector<float>`。这些托管内核的写法受到 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR) 的启发。
+图在进程内执行（`src/Magika/Onnx`）。x64 使用手写的 AVX-512 和 AVX2/FMA 内核。其它 CPU（包括 Apple Silicon）使用 `System.Numerics.Vector<float>`。这些托管内核的写法受到 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR) 的启发。框架依赖的运行会在运行时选择内核。Native AOT 会把这个选择固定下来，因此下面的发布 zip 把 AVX2 和 AVX-512 分成两份二进制。AVX-512 包还会把 `IlcMaxVectorTBitWidth` 设为 512，让 `System.Numerics.Vector<T>` 使用 512 位。AVX2 包保持 x64 上的默认宽度。
 
 `OnnxSession.Run` 按真实 batch 计算（第一维是行数）。会话把不可变的 initializer 放在同一个字典里，并按形状复用激活缓冲，因此热运行不会再分配这些张量。返回的概率是一份拷贝，下一次运行可以复用输出缓冲。仍然不依赖 Microsoft.ML.OnnxRuntime。
 
@@ -74,11 +74,13 @@ dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./f
 
 项目版本 `0.1.2`。推送 `v0.1.2` 这样的 `v*` tag，或用该版本手动跑 Release workflow，会发布 Native AOT zip 和 `SHA256SUMS.txt`：
 
-| 文件 | 构建环境 |
-| --- | --- |
-| `magika-<tag>-linux-x64.zip` | `ubuntu-latest` |
-| `magika-<tag>-osx-arm64.zip` | `macos-latest`（Apple Silicon） |
-| `magika-<tag>-win-x64.zip` | `windows-latest` |
+| 文件 | 构建环境 | CPU |
+| --- | --- | --- |
+| `magika-<tag>-linux-x64-avx2.zip` | `ubuntu-latest` | 带 AVX2 的 x64 |
+| `magika-<tag>-linux-x64-avx512.zip` | `ubuntu-latest` | 带 AVX-512 的 x64 |
+| `magika-<tag>-win-x64-avx2.zip` | `windows-latest` | 带 AVX2 的 x64 |
+| `magika-<tag>-win-x64-avx512.zip` | `windows-latest` | 带 AVX-512 的 x64 |
+| `magika-<tag>-osx-arm64.zip` | `macos-latest`（Apple Silicon） | arm64 |
 
 每个 zip 里有二进制、`RUN.txt`、`LICENSE`、`THIRD-PARTY-NOTICES.md` 和 `VERSION.txt`。
 
