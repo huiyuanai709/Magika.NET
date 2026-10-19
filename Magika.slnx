@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Magika/Magika.csproj" />
+    <Project Path="src/Magika.Cli/Magika.Cli.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Magika.Tests/Magika.Tests.csproj" />
+  </Folder>
+</Solution>

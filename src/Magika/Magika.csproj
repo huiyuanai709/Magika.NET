@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Magika</RootNamespace>
+    <AssemblyName>Magika</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Description>AI file content-type detection for .NET. Managed ONNX inference with no native runtime.</Description>
+    <PackageId>Magika.NET</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>huiyuanai709</Authors>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/huiyuanai709/Magika.NET</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>magika;content-type;onnx;file-type</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\assets\models\standard_v3_3\model.onnx" LogicalName="Magika.Models.standard_v3_3.model.onnx" />
+    <EmbeddedResource Include="..\..\assets\models\standard_v3_3\config.min.json" LogicalName="Magika.Models.standard_v3_3.config.min.json" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\THIRD-PARTY-NOTICES.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Magika.Tests" />
+  </ItemGroup>
+</Project>

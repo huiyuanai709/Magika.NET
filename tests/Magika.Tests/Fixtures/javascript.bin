@@ -1,0 +1,20 @@
+function hello(name) {
+  console.log("hi", name);
+  return name + 1;
+}
+function hello(name) {
+  console.log("hi", name);
+  return name + 1;
+}
+function hello(name) {
+  console.log("hi", name);
+  return name + 1;
+}
+function hello(name) {
+  console.log("hi", name);
+  return name + 1;
+}
+function hello(name) {
+  console.log("hi", name);
+  return name + 1;
+}
