@@ -22,6 +22,8 @@ Console.WriteLine(result.Score);
 
 `Identify` 接受字节。`Identify(Stream)` 会恢复流的位置；流可查找时，只从开头和结尾各读一块。`IdentifyPath` 把目录标成 `directory`。符号链接默认跟随目标；`FollowSymlinks` 为 false 时标成 `symlink`。
 
+`IdentifyAsync` 和 `IdentifyPathAsync` 接受 `CancellationToken`，读取的仍是同一段前缀和后缀。路径使用 `RandomAccess.ReadAsync`。库和 CLI 用 `<Features>$(Features);runtime-async=on</Features>` 编译异步方法。取消只作用于读取；ONNX 推理本身是同步的。
+
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
 {
