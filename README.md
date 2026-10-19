@@ -47,7 +47,7 @@ dotnet run --project src/Magika.Cli -c Release -- sample.pdf
 dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
 ```
 
-Text output is `path: label score mime group`. `--version` prints the library version and the model name. Exit code `1` means a file could not be read. Exit code `2` means the arguments were invalid.
+Text output is `path: label score mime group`. `--version` prints the library version and the model name. A binary published with Satori GC adds a second line, `gc: satori`. Exit code `1` means a file could not be read. Exit code `2` means the arguments were invalid.
 
 A release binary is `./magika` on Linux and macOS, and `magika.exe` on Windows. See `RUN.txt` inside each zip.
 
@@ -72,6 +72,8 @@ Project version `0.1.1`. Pushing a `v*` tag such as `v0.1.1`, or running the Rel
 | `magika-<tag>-win-x64.zip` | `windows-latest` |
 
 Each zip contains the binary, `RUN.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.md`, and `VERSION.txt`.
+
+Those Native AOT binaries use [Satori GC](https://www.nuget.org/packages/PublishWithSatoriGC/11.0.0-satori.38707303131.1) (MIT, .NET Foundation). `src/Magika.Cli` imports the `PublishWithSatoriGC` SDK at `11.0.0-satori.38707303131.1`. `UseSatoriGC` stays at the SDK default, `true`, so a self-contained or `PublishAot` publish of the CLI uses Satori. `dotnet pack` still produces a framework-dependent `PackAsTool` package; Satori applies to the self-contained Native AOT release zips, not to that tool pack.
 
 ## Development
 

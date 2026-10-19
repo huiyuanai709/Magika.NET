@@ -21,6 +21,10 @@ static int Run(string[] args)
                 return 0;
             case "--version":
                 Console.WriteLine($"magika {typeof(MagikaSession).Assembly.GetName().Version} ({ModelDefinitionName()})");
+                if (GC.GetConfigurationVariables().ContainsKey("SatoriGC"))
+                {
+                    Console.WriteLine("gc: satori");
+                }
                 return 0;
             case "--json":
                 json = true;

@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- Self-contained and Native AOT publishes use Satori GC. UseSatoriGC defaults to true.
+       PackAsTool stays framework-dependent; Satori packs are restored only when a RID is set. -->
+  <Sdk Name="PublishWithSatoriGC" Version="11.0.0-satori.38707303131.1" />
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <AssemblyName>Magika.Cli</AssemblyName>
