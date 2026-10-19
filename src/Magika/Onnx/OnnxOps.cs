@@ -367,7 +367,7 @@ internal static class OnnxOps
 
         int[] shape = BroadcastShape(a.Shape, b.Shape);
         int n = OnnxTensor.ElementCount(shape);
-        float[] dest = new float[n];
+        float[] dest = GC.AllocateUninitializedArray<float>(n);
         int[] strideA = BroadcastStrides(a.Shape, shape);
         int[] strideB = BroadcastStrides(b.Shape, shape);
         if (TryContiguousBinary(a, b, dest, op) ||
@@ -388,6 +388,19 @@ internal static class OnnxOps
         return OnnxTensor.Float(shape, dest);
     }
 
+    internal static OnnxTensor Tanh(OnnxTensor data)
+    {
+        if (data.DType != OnnxDType.Float)
+        {
+            throw new NotSupportedException($"Unary op requires float, got {data.DType}.");
+        }
+
+        float[] source = data.Floats!;
+        float[] dest = GC.AllocateUninitializedArray<float>(source.Length);
+        SimdMath.Tanh(source, dest);
+        return OnnxTensor.Float(data.Shape.ToArray(), dest);
+    }
+
     internal static OnnxTensor UnaryFloat(OnnxTensor data, FloatUnary op)
     {
         if (data.DType != OnnxDType.Float)
@@ -396,7 +409,7 @@ internal static class OnnxOps
         }
 
         float[] source = data.Floats!;
-        float[] dest = new float[source.Length];
+        float[] dest = GC.AllocateUninitializedArray<float>(source.Length);
         for (int i = 0; i < source.Length; i++)
         {
             dest[i] = op(source[i]);
@@ -582,7 +595,7 @@ internal static class OnnxOps
         int[] inStrides = Strides(data.Shape);
         int[] outStrides = Strides(shape);
         float[] source = data.Floats!;
-        float[] dest = new float[n];
+        float[] dest = GC.AllocateUninitializedArray<float>(n);
         if (TryTransposeLastSingleton(data.Shape, perm, source, dest))
         {
             return OnnxTensor.Float(shape, dest);
@@ -623,7 +636,7 @@ internal static class OnnxOps
         int rows = a.Length / k;
         int[] shape = a.Shape.ToArray();
         shape[^1] = n;
-        float[] dest = new float[rows * n];
+        float[] dest = GC.AllocateUninitializedArray<float>(rows * n);
         SimdGemm.Multiply(a.Floats!, b.Floats!, dest, rows, k, n);
         return OnnxTensor.Float(shape, dest);
     }
@@ -649,7 +662,7 @@ internal static class OnnxOps
         int[] shape = new int[seq.Length + 1];
         seq.CopyTo(shape, 0);
         shape[^1] = dim;
-        float[] dest = new float[positions * dim];
+        float[] dest = GC.AllocateUninitializedArray<float>(positions * dim);
         float[] table = weight.Floats!;
         for (int i = 0; i < positions; i++)
         {
@@ -708,7 +721,7 @@ internal static class OnnxOps
 
         int spatial = outH * outW;
         int depth = channels * kH * kW;
-        float[] dest = new float[batch * filters * spatial];
+        float[] dest = GC.AllocateUninitializedArray<float>(batch * filters * spatial);
         float[] source = input.Floats!;
         int colCount = depth * spatial;
         float[] column = ArrayPool<float>.Shared.Rent(colCount);
@@ -760,10 +773,7 @@ internal static class OnnxOps
                 {
                     int dest = row * spatial;
                     int src = channelBase + kh;
-                    for (int oh = 0; oh < outH; oh++)
-                    {
-                        column[dest + oh] = input[src + oh];
-                    }
+                    input.AsSpan(src, outH).CopyTo(column.AsSpan(dest, outH));
 
                     row++;
                 }
