@@ -50,7 +50,7 @@ public sealed partial class MagikaSession
 
         if (options.InferenceWorkers < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.InferenceWorkers, "InferenceWorkers must be at least 0. 0 uses one lane per processor.");
+            throw new ArgumentOutOfRangeException(nameof(options), options.InferenceWorkers, "InferenceWorkers must be at least 0. 0 chooses the lane count.");
         }
 
         ModelDefinition model = ModelDefinition.LoadDefault();
@@ -58,7 +58,7 @@ public sealed partial class MagikaSession
         using MemoryStream copy = new();
         stream.CopyTo(copy);
         Onnx.OnnxSession session = Onnx.OnnxSession.Load(copy.GetBuffer().AsSpan(0, (int)copy.Length));
-        return new MagikaSession(model, session, options, ResolveWorkers(options.InferenceWorkers));
+        return new MagikaSession(model, session, options, ResolveWorkers(options.InferenceWorkers, session.Specialized));
     }
 
     /// <summary>Identifies a buffer.</summary>
@@ -190,6 +190,8 @@ public sealed partial class MagikaSession
     internal bool EmbeddingFused => _session.EmbeddingFused;
 
     internal bool Specialized => _session.Specialized;
+
+    internal int WorkerCount => _workerCount;
 
     internal ModelDefinition Model => _model;
 
