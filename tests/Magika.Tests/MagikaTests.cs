@@ -688,6 +688,72 @@ public class MagikaTests
     }
 
     [Fact]
+    public void Specialized_AgreesWithInterpreterOnSingleAndPackedRows()
+    {
+        MagikaSession session = MagikaSession.Create();
+        Assert.True(session.Specialized);
+        Onnx.StandardV33Session.CheckKernels();
+        // The specialized graph matches the interpreter within 1e-4 absolute on probabilities.
+        // Single-row and packed runs of the specialized path are bit-identical.
+        string[] names = ["pdf", "png", "zip", "text", "javascript", "elf", "ambiguous", "html", "json", "python", "gzip"];
+        int width = session.Model.FeaturesSize;
+        int[] packed = new int[names.Length * width];
+        const float tolerance = 1e-4f;
+        for (int i = 0; i < names.Length; i++)
+        {
+            byte[] bytes = File.ReadAllBytes(Fixture(names[i] + ".bin"));
+            float[] fast = session.Score(bytes);
+            float[] slow = session.ScoreReference(bytes);
+            Assert.Equal(slow.Length, fast.Length);
+            float max = MaxAbs(slow, fast);
+            Assert.True(max <= tolerance, $"{names[i]} single max abs diff {max:R} tolerance {tolerance:R}");
+            FeatureExtractor.Extract(bytes, session.Model).CopyTo(packed.AsSpan(i * width, width));
+        }
+
+        float[] batched = session.ScorePacked(packed, names.Length);
+        float[] batchedReference = session.ScorePackedReference(packed, names.Length);
+        float batchMax = MaxAbs(batchedReference, batched);
+        Assert.True(batchMax <= tolerance, $"packed max abs diff {batchMax:R} tolerance {tolerance:R}");
+        for (int i = 0; i < names.Length; i++)
+        {
+            float[] fast = session.Score(File.ReadAllBytes(Fixture(names[i] + ".bin")));
+            for (int j = 0; j < fast.Length; j++)
+            {
+                Assert.Equal(fast[j], batched[(i * fast.Length) + j]);
+            }
+        }
+
+        var random = new Random(11);
+        int rows = 5;
+        int[] randomPacked = new int[rows * width];
+        for (int i = 0; i < randomPacked.Length; i++)
+        {
+            randomPacked[i] = random.Next(257);
+        }
+
+        float[] randomFast = session.ScorePacked(randomPacked, rows);
+        float[] randomSlow = session.ScorePackedReference(randomPacked, rows);
+        float randomMax = MaxAbs(randomSlow, randomFast);
+        Assert.True(randomMax <= tolerance, $"random packed max abs diff {randomMax:R} tolerance {tolerance:R}");
+        float[] randomSingle = session.ScorePacked(randomPacked.AsSpan(0, width), 1);
+        for (int j = 0; j < randomSingle.Length; j++)
+        {
+            Assert.Equal(randomSingle[j], randomFast[j]);
+        }
+    }
+
+    private static float MaxAbs(float[] expected, float[] actual)
+    {
+        float max = 0f;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            max = MathF.Max(max, MathF.Abs(expected[i] - actual[i]));
+        }
+
+        return max;
+    }
+
+    [Fact]
     public void Inference_IsCpuFastEnoughForInteractiveUse()
     {
         MagikaSession session = MagikaSession.Create();

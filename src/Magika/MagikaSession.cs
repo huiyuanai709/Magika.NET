@@ -189,6 +189,8 @@ public sealed partial class MagikaSession
 
     internal bool EmbeddingFused => _session.EmbeddingFused;
 
+    internal bool Specialized => _session.Specialized;
+
     internal ModelDefinition Model => _model;
 
     internal float[] Score(ReadOnlySpan<byte> content)
@@ -215,6 +217,33 @@ public sealed partial class MagikaSession
         lock (_gate)
         {
             return _session.Run(features, batch, _model.FeaturesSize);
+        }
+    }
+
+    internal float[] ScoreReference(ReadOnlySpan<byte> content)
+    {
+        int[] features = FeatureExtractor.Extract(content, _model);
+        if (!FeatureExtractor.HasEnoughContent(features, _model))
+        {
+            throw new InvalidOperationException("Content is too small for the model.");
+        }
+
+        lock (_gate)
+        {
+            return _session.RunInterpreted(features, batch: 1, _model.FeaturesSize);
+        }
+    }
+
+    internal float[] ScorePackedReference(ReadOnlySpan<int> features, int batch)
+    {
+        if (batch <= 0 || features.Length != batch * _model.FeaturesSize)
+        {
+            throw new ArgumentException("Feature buffer does not match the batch.", nameof(features));
+        }
+
+        lock (_gate)
+        {
+            return _session.RunInterpreted(features, batch, _model.FeaturesSize);
         }
     }
 

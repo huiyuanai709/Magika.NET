@@ -147,4 +147,84 @@ internal static class SimdMath
         exponent = Avx2.ShiftLeftLogical(exponent, 23);
         return Avx.Multiply(y, exponent.As<int, float>());
     }
+
+    /// <summary>
+    /// tanh-approximate GELU used by <c>standard_v3_3</c>, with the same multiply association as the graph:
+    /// <c>x * (half * (1 + tanh(scale * (x + ((cubic * x) * x) * x))))</c>.
+    /// </summary>
+    internal static void Gelu(Span<float> data, float cubic, float scale, float one, float half)
+    {
+        if (Avx512F.IsSupported)
+        {
+            Gelu512(data, cubic, scale, one, half);
+            return;
+        }
+
+        if (Avx2.IsSupported && Fma.IsSupported)
+        {
+            Gelu256(data, cubic, scale, one, half);
+            return;
+        }
+
+        for (int i = 0; i < data.Length; i++)
+        {
+            data[i] = GeluScalar(data[i], cubic, scale, one, half);
+        }
+    }
+
+    internal static float GeluScalar(float x, float cubic, float scale, float one, float half)
+    {
+        float cubicTerm = ((cubic * x) * x) * x;
+        float inner = x + cubicTerm;
+        float tanh = MathF.Tanh(scale * inner);
+        return x * (half * (one + tanh));
+    }
+
+    private static void Gelu512(Span<float> data, float cubic, float scale, float one, float half)
+    {
+        Vector512<float> cubicV = Vector512.Create(cubic);
+        Vector512<float> scaleV = Vector512.Create(scale);
+        Vector512<float> oneV = Vector512.Create(one);
+        Vector512<float> halfV = Vector512.Create(half);
+        ref float start = ref MemoryMarshal.GetReference(data);
+        int i = 0;
+        for (; i + 16 <= data.Length; i += 16)
+        {
+            Vector512<float> x = Vector512.LoadUnsafe(ref start, (nuint)i);
+            Vector512<float> cubicTerm = Avx512F.Multiply(Avx512F.Multiply(Avx512F.Multiply(cubicV, x), x), x);
+            Vector512<float> inner = Avx512F.Add(x, cubicTerm);
+            Vector512<float> tanh = Tanh(Avx512F.Multiply(scaleV, inner));
+            Vector512<float> y = Avx512F.Multiply(x, Avx512F.Multiply(halfV, Avx512F.Add(oneV, tanh)));
+            y.StoreUnsafe(ref start, (nuint)i);
+        }
+
+        for (; i < data.Length; i++)
+        {
+            data[i] = GeluScalar(data[i], cubic, scale, one, half);
+        }
+    }
+
+    private static void Gelu256(Span<float> data, float cubic, float scale, float one, float half)
+    {
+        Vector256<float> cubicV = Vector256.Create(cubic);
+        Vector256<float> scaleV = Vector256.Create(scale);
+        Vector256<float> oneV = Vector256.Create(one);
+        Vector256<float> halfV = Vector256.Create(half);
+        ref float start = ref MemoryMarshal.GetReference(data);
+        int i = 0;
+        for (; i + 8 <= data.Length; i += 8)
+        {
+            Vector256<float> x = Vector256.LoadUnsafe(ref start, (nuint)i);
+            Vector256<float> cubicTerm = Avx.Multiply(Avx.Multiply(Avx.Multiply(cubicV, x), x), x);
+            Vector256<float> inner = Avx.Add(x, cubicTerm);
+            Vector256<float> tanh = Tanh(Avx.Multiply(scaleV, inner));
+            Vector256<float> y = Avx.Multiply(x, Avx.Multiply(halfV, Avx.Add(oneV, tanh)));
+            y.StoreUnsafe(ref start, (nuint)i);
+        }
+
+        for (; i < data.Length; i++)
+        {
+            data[i] = GeluScalar(data[i], cubic, scale, one, half);
+        }
+    }
 }

@@ -7,15 +7,19 @@ namespace Magika.Onnx;
 internal sealed class OnnxSession
 {
     private readonly OnnxModel _model;
+    private readonly StandardV33Model? _v33;
+    private readonly StandardV33Session? _v33State;
     private readonly Dictionary<string, OnnxTensor> _values;
     private readonly string[] _restoreInitializers;
     private readonly OnnxScratch _scratch = new();
     private readonly Dictionary<int, int[]> _tokenBuffers = new();
     private readonly Dictionary<int, OnnxTensor> _inputs = new();
 
-    private OnnxSession(OnnxModel model)
+    private OnnxSession(OnnxModel model, StandardV33Model? specialized)
     {
         _model = model;
+        _v33 = specialized ?? StandardV33Model.TryCreate(model);
+        _v33State = _v33 is null ? null : new StandardV33Session(_v33);
         _values = new Dictionary<string, OnnxTensor>(model.Initializers, StringComparer.Ordinal);
         List<string>? overwritten = null;
         foreach (OnnxNode node in model.Nodes)
@@ -35,14 +39,27 @@ internal sealed class OnnxSession
 
     public bool EmbeddingFused => _model.EmbeddingFused;
 
+    internal bool Specialized => _v33 is not null;
+
     public int OutputWidth { get; private set; }
 
-    public static OnnxSession Load(ReadOnlySpan<byte> model) => new(OnnxModel.Load(model));
+    public static OnnxSession Load(ReadOnlySpan<byte> model) => new(OnnxModel.Load(model), specialized: null);
 
     /// <summary>Another evaluation state over the same immutable weights.</summary>
-    public OnnxSession Fork() => new(_model);
+    public OnnxSession Fork() => new(_model, _v33);
 
     public float[] Run(ReadOnlySpan<int> tokens, int batch, int sequence)
+    {
+        if (_v33State is not null && sequence == StandardV33Model.Sequence)
+        {
+            OutputWidth = StandardV33Model.Classes;
+            return _v33State.Evaluate(tokens, batch);
+        }
+
+        return RunInterpreted(tokens, batch, sequence);
+    }
+
+    internal float[] RunInterpreted(ReadOnlySpan<int> tokens, int batch, int sequence)
     {
         if (batch <= 0 || sequence <= 0 || tokens.Length != batch * sequence)
         {
