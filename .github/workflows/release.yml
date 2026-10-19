@@ -179,6 +179,26 @@ jobs:
           fi
           file "$bin" | grep -Eq 'arm64|ARM64'
 
+      # apple-m1 smoke disassembles the binary. macos-latest ships llvm-objdump
+      # inside the Xcode toolchain, not on PATH. A wrapper keeps `xcrun` in
+      # front of it so the existing llvm-objdump branch in check-aot-isa.sh runs.
+      - name: Expose Xcode llvm-objdump
+        if: matrix.rid == 'osx-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! dump="$(xcrun --find llvm-objdump 2>/dev/null)" || [ ! -x "$dump" ]; then
+            echo "xcrun llvm-objdump not found; the ISA check will use otool" >&2
+            command -v otool >/dev/null
+            exit 0
+          fi
+          bindir="${RUNNER_TEMP}/bin"
+          mkdir -p "$bindir"
+          printf '%s\n' '#!/bin/sh' 'exec xcrun llvm-objdump "$@"' > "${bindir}/llvm-objdump"
+          chmod +x "${bindir}/llvm-objdump"
+          echo "$bindir" >> "$GITHUB_PATH"
+          "${bindir}/llvm-objdump" --version
+
       - name: Smoke the published binary
         shell: bash
         env:

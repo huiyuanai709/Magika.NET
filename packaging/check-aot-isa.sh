@@ -3,6 +3,9 @@
 # Usage: check-aot-isa.sh <binary> <avx2|avx512|apple-m1>
 # avx2 requires ymm and vfmadd and no zmm. avx512 requires zmm.
 # apple-m1 requires AdvSimd float ops (.4s / fmla / fadd).
+# Linux and Windows disassemble with objdump, llvm-objdump, or dumpbin.
+# macos-latest does not put those on PATH. Xcode's llvm-objdump is
+# available through xcrun, and otool -tV prints the same AdvSimd tokens.
 set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -74,12 +77,31 @@ disassemble() {
     llvm-objdump -d "$binary"
     return
   fi
+  # PATH objdump and llvm-objdump stay first on every OS.
+  # macos-latest has neither. Xcode's llvm-objdump is behind xcrun, and
+  # otool -tV prints the same AdvSimd tokens. dumpbin stays the Windows path.
+  local host_os=""
+  host_os="$(uname -s 2>/dev/null || true)"
+  if [ "$host_os" = "Darwin" ]; then
+    if command -v xcrun >/dev/null 2>&1 && xcrun --find llvm-objdump >/dev/null 2>&1; then
+      xcrun llvm-objdump -d "$binary"
+      return
+    fi
+    if command -v otool >/dev/null 2>&1; then
+      otool -tV "$binary"
+      return
+    fi
+  fi
   local dumpbin
   if dumpbin="$(find_dumpbin)"; then
     "$dumpbin" /DISASM /NOLOGO "$binary"
     return
   fi
-  echo "need objdump, llvm-objdump, or dumpbin to check ${binary}" >&2
+  if [ "$host_os" = "Darwin" ]; then
+    echo "need Xcode llvm-objdump (xcrun llvm-objdump) or otool to check ${binary}" >&2
+  else
+    echo "need objdump, llvm-objdump, or dumpbin to check ${binary}" >&2
+  fi
   return 1
 }
 

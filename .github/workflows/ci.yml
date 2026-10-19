@@ -14,6 +14,10 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      - name: Test Native AOT ISA check
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./packaging/check-aot-isa.test.sh
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
