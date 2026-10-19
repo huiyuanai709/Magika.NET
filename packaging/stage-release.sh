@@ -16,8 +16,8 @@ zip_path="$4"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$rid" in
-  linux-x64) published="Magika.Cli"; binary="magika" ;;
-  win-x64) published="Magika.Cli.exe"; binary="magika.exe" ;;
+  linux-x64|osx-arm64) published="Magika.Cli"; binary="magika"; expect_exec=1 ;;
+  win-x64) published="Magika.Cli.exe"; binary="magika.exe"; expect_exec=0 ;;
   *)
     echo "unsupported rid: ${rid}" >&2
     exit 2
@@ -43,12 +43,6 @@ if [ ! -f "$publish_dir/$published" ]; then
   exit 1
 fi
 
-if [ "$rid" = "linux-x64" ]; then
-  expect_exec=1
-else
-  expect_exec=0
-fi
-
 stage="$(mktemp -d)"
 cleanup() {
   rm -rf "$stage"
@@ -56,7 +50,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp "$publish_dir/$published" "$stage/$binary"
-if [ "$rid" = "linux-x64" ]; then
+if [ "$expect_exec" -eq 1 ]; then
   chmod +x "$stage/$binary"
 fi
 

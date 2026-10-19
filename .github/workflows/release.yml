@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号，例如 0.1.0 或 v0.1.0。预发布用 0.1.0-rc.1。"
+        description: "版本号，例如 0.1.1 或 v0.1.1。预发布用 0.1.1-rc.1。"
         required: true
         type: string
       dry_run:
@@ -85,6 +85,9 @@ jobs:
             rid: win-x64
           - os: ubuntu-latest
             rid: linux-x64
+          # macos-latest is Apple Silicon. osx-arm64 Native AOT links with the macOS SDK.
+          - os: macos-latest
+            rid: osx-arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -96,6 +99,20 @@ jobs:
       - name: Install Native AOT build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Require an Apple Silicon runner
+        if: matrix.rid == 'osx-arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64|aarch64) ;;
+            *)
+              echo "osx-arm64 Native AOT must run on Apple Silicon; uname -m is ${arch}" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Native AOT publish
         shell: bash
@@ -132,10 +149,12 @@ jobs:
           "$bin" --help
           out="$("$bin" tests/Magika.Tests/Fixtures/pdf.bin)"
           echo "$out"
-          case "$out" in
-            *pdf*) ;;
-            *) echo "linux-x64 binary did not classify the PDF fixture" >&2; exit 1 ;;
-          esac
+          label="${out#*: }"
+          label="${label%% *}"
+          if [ "$label" != "pdf" ]; then
+            echo "linux-x64 binary did not classify the PDF fixture as pdf" >&2
+            exit 1
+          fi
 
       - name: Smoke the published binary (win-x64)
         if: runner.os == 'Windows'
@@ -146,7 +165,29 @@ jobs:
           & $bin --help
           $out = & $bin "tests/Magika.Tests/Fixtures/pdf.bin"
           Write-Host $out
-          if ($out -notmatch "pdf") { throw "win-x64 binary did not classify the PDF fixture" }
+          if ($out -notmatch ": pdf\s") { throw "win-x64 binary did not classify the PDF fixture as pdf" }
+
+      - name: Smoke the published binary (osx-arm64)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=artifacts/osx-arm64/Magika.Cli
+          chmod +x "$bin"
+          if ! codesign --verify "$bin" >/dev/null 2>&1; then
+            codesign --force --sign - "$bin"
+          fi
+          file "$bin" | grep -Eq 'arm64|ARM64'
+          "$bin" --version
+          "$bin" --help
+          out="$("$bin" tests/Magika.Tests/Fixtures/pdf.bin)"
+          echo "$out"
+          label="${out#*: }"
+          label="${label%% *}"
+          if [ "$label" != "pdf" ]; then
+            echo "osx-arm64 binary did not classify the PDF fixture as pdf" >&2
+            exit 1
+          fi
 
       - name: Pack the release zip
         shell: bash
@@ -192,12 +233,14 @@ jobs:
         run: |
           set -euo pipefail
           linux="magika-${TAG}-linux-x64.zip"
+          mac="magika-${TAG}-osx-arm64.zip"
           windows="magika-${TAG}-win-x64.zip"
           test -f "dist/$linux"
+          test -f "dist/$mac"
           test -f "dist/$windows"
           (
             cd dist
-            sha256sum "$linux" "$windows" > SHA256SUMS.txt
+            sha256sum "$linux" "$mac" "$windows" > SHA256SUMS.txt
           )
           ./packaging/release-notes.sh "$TAG" > dist/notes.md
 
@@ -211,6 +254,7 @@ jobs:
           set -euo pipefail
           assets=(
             "dist/magika-${TAG}-linux-x64.zip"
+            "dist/magika-${TAG}-osx-arm64.zip"
             "dist/magika-${TAG}-win-x64.zip"
             dist/SHA256SUMS.txt
           )
