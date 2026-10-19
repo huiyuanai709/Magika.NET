@@ -1,16 +1,46 @@
 namespace Magika.Onnx;
 
+/// <summary>
+/// One managed ONNX evaluation state. <see cref="Run"/> is not thread-safe; the public session serializes it.
+/// Weights are shared with sessions created by <see cref="Fork"/>. Activation scratch is not.
+/// </summary>
 internal sealed class OnnxSession
 {
     private readonly OnnxModel _model;
+    private readonly Dictionary<string, OnnxTensor> _values;
+    private readonly string[] _restoreInitializers;
+    private readonly OnnxScratch _scratch = new();
+    private readonly Dictionary<int, int[]> _tokenBuffers = new();
+    private readonly Dictionary<int, OnnxTensor> _inputs = new();
 
-    private OnnxSession(OnnxModel model) => _model = model;
+    private OnnxSession(OnnxModel model)
+    {
+        _model = model;
+        _values = new Dictionary<string, OnnxTensor>(model.Initializers, StringComparer.Ordinal);
+        List<string>? overwritten = null;
+        foreach (OnnxNode node in model.Nodes)
+        {
+            foreach (string output in node.Outputs)
+            {
+                if (output.Length > 0 && model.Initializers.ContainsKey(output))
+                {
+                    overwritten ??= [];
+                    overwritten.Add(output);
+                }
+            }
+        }
+
+        _restoreInitializers = overwritten?.ToArray() ?? [];
+    }
 
     public bool EmbeddingFused => _model.EmbeddingFused;
 
     public int OutputWidth { get; private set; }
 
     public static OnnxSession Load(ReadOnlySpan<byte> model) => new(OnnxModel.Load(model));
+
+    /// <summary>Another evaluation state over the same immutable weights.</summary>
+    public OnnxSession Fork() => new(_model);
 
     public float[] Run(ReadOnlySpan<int> tokens, int batch, int sequence)
     {
@@ -19,30 +49,35 @@ internal sealed class OnnxSession
             throw new ArgumentException("Token buffer does not match batch and sequence.", nameof(tokens));
         }
 
-        Dictionary<string, OnnxTensor> values = new(_model.Initializers, StringComparer.Ordinal);
-        int[] input = new int[tokens.Length];
-        tokens.CopyTo(input);
-        values[_model.InputName] = OnnxTensor.Int32([batch, sequence], input);
-
-        foreach (OnnxNode node in _model.Nodes)
+        foreach (string name in _restoreInitializers)
         {
-            try
-            {
-                OnnxTensor output = Execute(node, values);
-                if (node.Outputs.Length == 0)
-                {
-                    throw new InvalidDataException($"ONNX node '{node.Name}' ({node.Op}) has no output.");
-                }
+            _values[name] = _model.Initializers[name];
+        }
 
-                values[node.Outputs[0]] = output;
-            }
-            catch (Exception ex) when (ex is not InvalidDataException || ex.Message.StartsWith("ONNX node", StringComparison.Ordinal) == false)
+        BindInput(tokens, batch, sequence);
+        using (_scratch.Enter())
+        {
+            foreach (OnnxNode node in _model.Nodes)
             {
-                throw new InvalidDataException($"ONNX node '{node.Name}' ({node.Op}) failed: {ex.Message}", ex);
+                try
+                {
+                    _scratch.SetSlot(node.Outputs.Length == 0 ? node.Name : node.Outputs[0]);
+                    OnnxTensor output = Execute(node, _values);
+                    if (node.Outputs.Length == 0)
+                    {
+                        throw new InvalidDataException($"ONNX node '{node.Name}' ({node.Op}) has no output.");
+                    }
+
+                    _values[node.Outputs[0]] = output;
+                }
+                catch (Exception ex) when (ex is not InvalidDataException || ex.Message.StartsWith("ONNX node", StringComparison.Ordinal) == false)
+                {
+                    throw new InvalidDataException($"ONNX node '{node.Name}' ({node.Op}) failed: {ex.Message}", ex);
+                }
             }
         }
 
-        if (!values.TryGetValue(_model.OutputName, out OnnxTensor? result) || result.Floats is null)
+        if (!_values.TryGetValue(_model.OutputName, out OnnxTensor? result) || result.Floats is null)
         {
             throw new InvalidDataException($"ONNX output '{_model.OutputName}' is missing.");
         }
@@ -54,7 +89,33 @@ internal sealed class OnnxSession
                 $"ONNX output length {result.Length} does not match batch {batch} by {OutputWidth}.");
         }
 
-        return result.Floats;
+        // The activation buffer is reused on the next run. Callers keep this copy.
+        float[] owned = GC.AllocateUninitializedArray<float>(result.Length);
+        result.Floats.AsSpan(0, result.Length).CopyTo(owned);
+        return owned;
+    }
+
+    private void BindInput(ReadOnlySpan<int> tokens, int batch, int sequence)
+    {
+        int length = tokens.Length;
+        if (!_tokenBuffers.TryGetValue(length, out int[]? buffer))
+        {
+            buffer = new int[length];
+            _tokenBuffers[length] = buffer;
+        }
+
+        tokens.CopyTo(buffer);
+        if (!_inputs.TryGetValue(length, out OnnxTensor? input)
+            || input.Shape.Length != 2
+            || input.Shape[0] != batch
+            || input.Shape[1] != sequence
+            || !ReferenceEquals(input.Ints, buffer))
+        {
+            input = OnnxTensor.Int32([batch, sequence], buffer);
+            _inputs[length] = input;
+        }
+
+        _values[_model.InputName] = input;
     }
 
     private static OnnxTensor Execute(OnnxNode node, Dictionary<string, OnnxTensor> values)

@@ -520,9 +520,157 @@ public class MagikaTests
     public void AsyncIdentify_IsCompiledWithRuntimeAsync()
     {
         AssertRuntimeAsync(typeof(MagikaSession).GetMethod(nameof(MagikaSession.IdentifyAsync))!);
+        AssertRuntimeAsync(typeof(MagikaSession).GetMethod(nameof(MagikaSession.IdentifyPathsAsync))!);
         AssertRuntimeAsync(typeof(MagikaSession).GetMethod("IdentifyFileAsync", BindingFlags.Instance | BindingFlags.NonPublic)!);
+        AssertRuntimeAsync(typeof(MagikaSession).GetMethod("PreparePathAsync", BindingFlags.Instance | BindingFlags.NonPublic)!);
         AssertRuntimeAsync(typeof(ContentEnds).GetMethod("ReadForwardAsync", BindingFlags.Static | BindingFlags.NonPublic)!);
         AssertRuntimeAsync(typeof(ContentEnds).GetMethod("ReadExactAtAsync", BindingFlags.Static | BindingFlags.NonPublic)!);
+    }
+
+    [Fact]
+    public void ScorePacked_MatchesSingleRowInference()
+    {
+        MagikaSession session = MagikaSession.Create();
+        string[] names = ["pdf", "png", "zip", "text", "javascript", "elf", "ambiguous", "html"];
+        int width = session.Model.FeaturesSize;
+        int[] packed = new int[names.Length * width];
+        float[][] single = new float[names.Length][];
+        for (int i = 0; i < names.Length; i++)
+        {
+            byte[] bytes = File.ReadAllBytes(Fixture(names[i] + ".bin"));
+            int[] features = FeatureExtractor.Extract(bytes, session.Model);
+            features.CopyTo(packed.AsSpan(i * width, width));
+            single[i] = session.Score(bytes);
+        }
+
+        float[] batched = session.ScorePacked(packed, names.Length);
+        float[] again = session.ScorePacked(packed, names.Length);
+        Assert.Equal(single[0].Length * names.Length, batched.Length);
+        for (int i = 0; i < names.Length; i++)
+        {
+            for (int j = 0; j < single[i].Length; j++)
+            {
+                Assert.Equal(single[i][j], batched[(i * single[i].Length) + j]);
+                Assert.Equal(single[i][j], again[(i * single[i].Length) + j]);
+            }
+        }
+    }
+
+    [Fact]
+    public void IdentifyFeaturesBatch_MatchesIdentifyAndKeepsOrder()
+    {
+        MagikaSession session = MagikaSession.Create(new MagikaOptions { BatchSize = 3, InferenceWorkers = 2 });
+        string[] names = ["elf", "pdf", "text", "png", "zip", "javascript", "html", "ambiguous"];
+        int width = session.Model.FeaturesSize;
+        int[] packed = new int[names.Length * width];
+        string?[] paths = new string?[names.Length];
+        MagikaResult[] expected = new MagikaResult[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            byte[] bytes = File.ReadAllBytes(Fixture(names[i] + ".bin"));
+            expected[i] = session.Identify(bytes);
+            FeatureExtractor.Extract(bytes, session.Model).CopyTo(packed.AsSpan(i * width, width));
+            paths[i] = names[i];
+        }
+
+        MagikaResult[] batched = session.IdentifyFeaturesBatch(packed, names.Length, paths);
+        Assert.Equal(names.Length, batched.Length);
+        for (int i = 0; i < names.Length; i++)
+        {
+            Assert.Equal(names[i], batched[i].Path);
+            AssertSame(expected[i], batched[i], names[i]);
+        }
+
+        MagikaResult one = session.IdentifyFeatures(packed.AsSpan(width, width), "pdf-row");
+        Assert.Equal("pdf-row", one.Path);
+        Assert.Equal("pdf", one.ContentType.Label);
+    }
+
+    [Fact]
+    public async Task IdentifyPaths_PreservesInputOrderAcrossHeuristicsAndModel()
+    {
+        MagikaSession session = MagikaSession.Create(new MagikaOptions
+        {
+            BatchSize = 2,
+            InferenceWorkers = 2,
+            FollowSymlinks = true,
+        });
+        string directory = Path.Combine(Path.GetTempPath(), "magika-batch-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            string pdf = Path.Combine(directory, "sample.pdf");
+            string text = Path.Combine(directory, "notes.txt");
+            string zip = Path.Combine(directory, "bundle.zip");
+            string empty = Path.Combine(directory, "empty.bin");
+            string nested = Path.Combine(directory, "nested");
+            Directory.CreateDirectory(nested);
+            await File.WriteAllBytesAsync(pdf, File.ReadAllBytes(Fixture("pdf.bin")));
+            await File.WriteAllBytesAsync(text, File.ReadAllBytes(Fixture("text.bin")));
+            await File.WriteAllBytesAsync(zip, File.ReadAllBytes(Fixture("zip.bin")));
+            await File.WriteAllBytesAsync(empty, []);
+            string link = pdf + ".link";
+            File.CreateSymbolicLink(link, pdf);
+            string[] ordered =
+            [
+                nested,
+                text,
+                empty,
+                pdf,
+                link,
+                zip,
+                directory,
+            ];
+
+            MagikaResult[] sync = session.IdentifyPaths(ordered);
+            MagikaResult[] asyncResults = await session.IdentifyPathsAsync(ordered);
+            Assert.Equal(ordered.Length, sync.Length);
+            for (int i = 0; i < ordered.Length; i++)
+            {
+                MagikaResult expected = session.IdentifyPath(ordered[i]);
+                Assert.Equal(ordered[i], sync[i].Path);
+                Assert.Equal(ordered[i], asyncResults[i].Path);
+                AssertSame(expected, sync[i], "sync " + ordered[i]);
+                AssertSame(expected, asyncResults[i], "async " + ordered[i]);
+            }
+
+            MagikaSession noFollow = MagikaSession.Create(new MagikaOptions { FollowSymlinks = false, BatchSize = 4 });
+            Assert.Equal("symlink", noFollow.IdentifyPaths([link])[0].ContentType.Label);
+            Parallel.For(0, 4, _ =>
+            {
+                Assert.Equal("pdf", session.IdentifyPath(pdf).ContentType.Label);
+                MagikaResult[] mixed = session.IdentifyPaths([text, pdf, empty, zip]);
+                Assert.Equal("txt", mixed[0].ContentType.Label);
+                Assert.Equal("pdf", mixed[1].ContentType.Label);
+                Assert.Equal("empty", mixed[2].ContentType.Label);
+                Assert.Equal("zip", mixed[3].ContentType.Label);
+            });
+            Assert.Empty(session.IdentifyPaths([]));
+            Assert.Throws<FileNotFoundException>(() => session.IdentifyPaths([pdf, Path.Combine(directory, "missing.bin")]));
+            int[] padded = new int[session.Model.FeaturesSize];
+            Array.Fill(padded, session.Model.PaddingToken);
+            Assert.Throws<ArgumentException>(() => session.IdentifyFeatures(padded));
+            using CancellationTokenSource canceled = new();
+            canceled.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.IdentifyPathsAsync(ordered, canceled.Token));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RepeatedInference_ReusesActivationBuffers()
+    {
+        MagikaSession session = MagikaSession.Create();
+        byte[] text = File.ReadAllBytes(Fixture("text.bin"));
+        float[] first = session.Score(text);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        float[] second = session.Score(text);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(first, second);
+        Assert.True(allocated < 256 * 1024, $"warm inference allocated {allocated} bytes");
     }
 
     [Fact]

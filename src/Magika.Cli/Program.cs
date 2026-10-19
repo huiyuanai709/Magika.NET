@@ -9,6 +9,8 @@ static async Task<int> RunAsync(string[] args)
     PredictionMode mode = PredictionMode.HighConfidence;
     bool json = false;
     bool follow = true;
+    int batchSize = MagikaOptions.Default.BatchSize;
+    int workers = MagikaOptions.Default.InferenceWorkers;
     List<string> paths = [];
     for (int i = 0; i < args.Length; i++)
     {
@@ -46,6 +48,22 @@ static async Task<int> RunAsync(string[] args)
                 }
 
                 break;
+            case "--batch-size":
+                if (i + 1 >= args.Length || !int.TryParse(args[++i], out batchSize))
+                {
+                    Console.Error.WriteLine("Missing or invalid value for --batch-size (1..64).");
+                    return 2;
+                }
+
+                break;
+            case "--workers":
+                if (i + 1 >= args.Length || !int.TryParse(args[++i], out workers))
+                {
+                    Console.Error.WriteLine("Missing or invalid value for --workers (0..32).");
+                    return 2;
+                }
+
+                break;
             default:
                 if (arg.StartsWith('-'))
                 {
@@ -64,27 +82,61 @@ static async Task<int> RunAsync(string[] args)
         return 2;
     }
 
-    MagikaSession session = MagikaSession.Create(new MagikaOptions
+    MagikaSession session;
+    try
     {
-        PredictionMode = mode,
-        FollowSymlinks = follow,
-    });
+        session = MagikaSession.Create(new MagikaOptions
+        {
+            PredictionMode = mode,
+            FollowSymlinks = follow,
+            BatchSize = batchSize,
+            InferenceWorkers = workers,
+        });
+    }
+    catch (ArgumentOutOfRangeException ex)
+    {
+        Console.Error.WriteLine(ex.Message);
+        return 2;
+    }
 
-    foreach (string path in paths)
+    if (paths.Count == 1)
     {
-        try
+        return await WriteOneAsync(paths[0], session, json).ConfigureAwait(false);
+    }
+
+    try
+    {
+        MagikaResult[] results = await session.IdentifyPathsAsync(paths).ConfigureAwait(false);
+        for (int i = 0; i < results.Length; i++)
         {
-            MagikaResult result = await session.IdentifyPathAsync(path).ConfigureAwait(false);
-            Console.WriteLine(json ? ToJson(path, result) : ToText(path, result));
+            Console.WriteLine(json ? ToJson(paths[i], results[i]) : ToText(paths[i], results[i]));
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException)
-        {
-            Console.Error.WriteLine($"{path}: {ex.Message}");
-            return 1;
-        }
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException)
+    {
+        string path = ex is FileNotFoundException missing && !string.IsNullOrEmpty(missing.FileName)
+            ? missing.FileName
+            : "";
+        Console.Error.WriteLine(path.Length == 0 ? ex.Message : $"{path}: {ex.Message}");
+        return 1;
     }
 
     return 0;
+}
+
+static async Task<int> WriteOneAsync(string path, MagikaSession session, bool json)
+{
+    try
+    {
+        MagikaResult result = await session.IdentifyPathAsync(path).ConfigureAwait(false);
+        Console.WriteLine(json ? ToJson(path, result) : ToText(path, result));
+        return 0;
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException)
+    {
+        Console.Error.WriteLine($"{path}: {ex.Message}");
+        return 1;
+    }
 }
 
 static string ModelDefinitionName() => "standard_v3_3";
@@ -161,8 +213,12 @@ static void PrintHelp()
         magika — identify file content types
 
         Usage:
-          magika [--json] [--prediction-mode high|medium|best-guess] [--no-dereference] <file>...
+          magika [--json] [--prediction-mode high|medium|best-guess] [--no-dereference]
+                 [--batch-size N] [--workers N] <file>...
 
         The model is Magika standard_v3_3, executed by a managed ONNX interpreter.
+        Several files are read concurrently, then scored in batches (default batch size 8).
+        --workers 0 uses one inference lane per processor, capped at 8.
+        Each lane is its own managed session. There is no native ONNX runtime.
         """);
 }

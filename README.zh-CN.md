@@ -24,6 +24,8 @@ Console.WriteLine(result.Score);
 
 `IdentifyAsync` 和 `IdentifyPathAsync` 接受 `CancellationToken`，读取的仍是同一段前缀和后缀。路径使用 `RandomAccess.ReadAsync`。库和 CLI 用 `<Features>$(Features);runtime-async=on</Features>` 编译异步方法。取消只作用于读取；ONNX 推理本身是同步的。
 
+`IdentifyPaths` 和 `IdentifyPathsAsync` 保持输入顺序。它们并发读取多个路径，再按批给特征向量打分（`MagikaOptions.BatchSize`，默认 8），用的是一池托管会话（`InferenceWorkers`）。`IdentifyFeatures` 和 `IdentifyFeaturesBatch` 给已经抽好的向量打分（这个模型每行 2048 个整数）。一个会话可以跨线程共用：单文件调用占用一条推理通道，多文件 API 使用通道池。通道池在第一次多文件调用时创建。各通道共享模型权重，激活暂存各自独立。一条通道同一时间只跑一次前向。`InferenceWorkers` 为 0 时，池大小是处理器数量，最多 8 条，每条通道的卷积分到相等的线程数。
+
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
 {
@@ -47,9 +49,12 @@ MagikaSession session = MagikaSession.Create(new MagikaOptions
 ```bash
 dotnet run --project src/Magika.Cli -c Release -- sample.pdf
 dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./files/*
 ```
 
-文本输出是 `路径: 标签 分数 MIME 分组`。`--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
+文本输出是 `路径: 标签 分数 MIME 分组`，顺序与参数一致。单个路径走 `IdentifyPathAsync`。多个路径并发读取，再用 `IdentifyPathsAsync` 打分。`--batch-size`（默认 8，范围 1..64）是一次前向里的特征行数。`--workers`（默认 0）是推理池：每个处理器一条通道，最多 8 条。每条通道是同一份权重上的托管会话。增加通道会把卷积的线程预算拆开。推理仍然是托管解释器。
+
+`--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
 
 发布包里的程序，Linux 和 macOS 是 `./magika`，Windows 是 `magika.exe`。用法写在每个 zip 的 `RUN.txt` 里。
 
@@ -62,6 +67,8 @@ dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode mediu
 ## 推理
 
 图在进程内执行（`src/Magika/Onnx`）。x64 使用手写的 AVX-512 和 AVX2/FMA 内核。其它 CPU（包括 Apple Silicon）使用 `System.Numerics.Vector<float>`。这些托管内核的写法受到 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR) 的启发。
+
+`OnnxSession.Run` 按真实 batch 计算（第一维是行数）。会话把不可变的 initializer 放在同一个字典里，并按形状复用激活缓冲，因此热运行不会再分配这些张量。返回的概率是一份拷贝，下一次运行可以复用输出缓冲。仍然不依赖 Microsoft.ML.OnnxRuntime。
 
 ## 发布
 

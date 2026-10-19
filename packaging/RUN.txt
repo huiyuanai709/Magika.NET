@@ -29,6 +29,7 @@ Windows:
 文本输出是「路径: 标签 分数 MIME 分组」。
 --prediction-mode 可以是 high、medium 或 best-guess，默认 high。
 --no-dereference 把符号链接标成 symlink，而不是跟随目标。
+多个文件会并发读取，再按批推理。--batch-size 默认 8（1..64）。--workers 默认 0（每个处理器一条通道，最多 8 条）。
 退出码：成功 0，找不到文件 1，参数错误 2。
 
 English
@@ -36,4 +37,5 @@ English
 This directory is one Native AOT release. The standard_v3_3 model is embedded.
 Run ./magika <file> on Linux or macOS Apple Silicon, or magika.exe <file> on Windows.
 If macOS blocks the downloaded binary, run `xattr -d com.apple.quarantine ./magika`.
-Text output is "path: label score mime group". See --help for the other flags.
+Text output is "path: label score mime group", in argument order.
+Several files are read concurrently and scored in batches. See --help for --batch-size and --workers.
