@@ -65,7 +65,7 @@ The graph runs in-process (`src/Magika/Onnx`). x64 uses handwritten AVX-512 and 
 
 ## Releases
 
-Project version `0.1.1`. Pushing a `v*` tag such as `v0.1.1`, or running the Release workflow with that version, publishes Native AOT zips and `SHA256SUMS.txt`:
+Project version `0.1.2`. Pushing a `v*` tag such as `v0.1.2`, or running the Release workflow with that version, publishes Native AOT zips and `SHA256SUMS.txt`:
 
 | Asset | Built on |
 | --- | --- |
