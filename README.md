@@ -66,7 +66,7 @@ Input tokens follow upstream Magika: up to 4096 bytes from the start and from th
 
 ## Inference
 
-The graph runs in-process (`src/Magika/Onnx`). x64 uses handwritten AVX-512 and AVX2/FMA kernels. Other CPUs, including Apple Silicon, use `System.Numerics.Vector<float>`. Those managed kernels are inspired by [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR). Framework-dependent runs pick the kernel at runtime. Native AOT freezes that choice, so the release zips below are separate AVX2 and AVX-512 binaries. The AVX-512 zip also sets `IlcMaxVectorTBitWidth` to 512 so `System.Numerics.Vector<T>` is 512 bits wide. The AVX2 zip leaves that width at the x64 default.
+The graph runs in-process (`src/Magika/Onnx`). x64 uses handwritten AVX-512 and AVX2/FMA kernels. Apple Silicon uses AdvSimd (`Vector128`) on the same dense, softmax, layer-norm, and GELU helpers, and `System.Numerics.Vector<float>` for the portable convolution. Those managed kernels are inspired by [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR). Framework-dependent runs pick the kernel at runtime. Native AOT freezes that choice, so the release zips below are separate AVX2 and AVX-512 binaries. The AVX-512 zip also sets `IlcMaxVectorTBitWidth` to 512 so `System.Numerics.Vector<T>` is 512 bits wide. The AVX2 zip leaves that width at the x64 default. The macOS zip is one binary built with `IlcInstructionSet=apple-m1`, which keeps AdvSimd.
 
 `OnnxSession.Run` evaluates a real batch (the leading dimension is the row count). A session keeps the immutable initializers in one dictionary and reuses activation buffers for the same shapes, so a warm run does not allocate those tensors again. The returned probabilities are a copy, so the next run can reuse the output buffer. There is still no Microsoft.ML.OnnxRuntime dependency.
 
@@ -80,7 +80,7 @@ Project version `0.1.3`. Pushing a `v*` tag such as `v0.1.3`, or running the Rel
 | `magika-<tag>-linux-x64-avx512.zip` | `ubuntu-latest` | x64 with AVX-512 |
 | `magika-<tag>-win-x64-avx2.zip` | `windows-latest` | x64 with AVX2 |
 | `magika-<tag>-win-x64-avx512.zip` | `windows-latest` | x64 with AVX-512 |
-| `magika-<tag>-osx-arm64.zip` | `macos-latest` (Apple Silicon) | arm64 |
+| `magika-<tag>-osx-arm64.zip` | `macos-latest` (Apple Silicon) | arm64, apple-m1 / AdvSimd |
 
 Each zip contains the binary, `RUN.txt`, `LICENSE`, `THIRD-PARTY-NOTICES.md`, and `VERSION.txt`.
 

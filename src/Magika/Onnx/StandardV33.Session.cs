@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 using System.Threading.Tasks;
 
@@ -377,6 +378,22 @@ internal sealed class StandardV33Session
             return;
         }
 
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            for (int d = 0; d < dim; d += 4)
+            {
+                Vector128<float> value = Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(src + d));
+                Vector128<float> total = AdvSimd.Add(Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(sum + d)), value);
+                Vector128<float> squares = AdvSimd.Add(
+                    Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(sumSq + d)),
+                    AdvSimd.Multiply(value, value));
+                total.StoreUnsafe(ref Unsafe.AsRef<float>(sum + d));
+                squares.StoreUnsafe(ref Unsafe.AsRef<float>(sumSq + d));
+            }
+
+            return;
+        }
+
         for (int d = 0; d < dim; d++)
         {
             float value = src[d];
@@ -430,6 +447,25 @@ internal sealed class StandardV33Session
             return;
         }
 
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> inv = Vector128.Create(invN);
+            Vector128<float> epsilon = Vector128.Create(eps);
+            for (int c = 0; c < channels; c += 4)
+            {
+                Vector128<float> total = Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(sum + c));
+                Vector128<float> squares = Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(sumSq + c));
+                Vector128<float> mean = AdvSimd.Multiply(total, inv);
+                Vector128<float> variance = AdvSimd.Subtract(AdvSimd.Multiply(squares, inv), AdvSimd.Multiply(mean, mean));
+                variance = AdvSimd.Max(variance, Vector128<float>.Zero);
+                Vector128<float> scale = AdvSimd.Arm64.Divide(Vector128<float>.One, AdvSimd.Arm64.Sqrt(AdvSimd.Add(variance, epsilon)));
+                mean.StoreUnsafe(ref Unsafe.AsRef<float>(sum + c));
+                scale.StoreUnsafe(ref Unsafe.AsRef<float>(invStd + c));
+            }
+
+            return;
+        }
+
         for (int c = 0; c < channels; c++)
         {
             float mean = sum[c] * invN;
@@ -457,6 +493,16 @@ internal sealed class StandardV33Session
             for (int d = 0; d < dim; d += 8)
             {
                 Vector256.LoadUnsafe(ref Unsafe.AsRef<float>(src + d)).StoreUnsafe(ref Unsafe.AsRef<float>(dst + d));
+            }
+
+            return;
+        }
+
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            for (int d = 0; d < dim; d += 4)
+            {
+                Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(src + d)).StoreUnsafe(ref Unsafe.AsRef<float>(dst + d));
             }
 
             return;
@@ -501,6 +547,21 @@ internal sealed class StandardV33Session
             return;
         }
 
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> gammaV = Vector128.Create(gamma);
+            Vector128<float> betaV = Vector128.Create(beta);
+            for (int c = 0; c < channels; c += 4)
+            {
+                Vector128<float> value = Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(row + c));
+                Vector128<float> scale = AdvSimd.Multiply(Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(invStd + c)), gammaV);
+                Vector128<float> centered = AdvSimd.Subtract(value, Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(mean + c)));
+                AdvSimd.Add(AdvSimd.Multiply(centered, scale), betaV).StoreUnsafe(ref Unsafe.AsRef<float>(row + c));
+            }
+
+            return;
+        }
+
         for (int c = 0; c < channels; c++)
         {
             row[c] = ((row[c] - mean[c]) * (invStd[c] * gamma)) + beta;
@@ -522,6 +583,13 @@ internal sealed class StandardV33Session
             {
                 Vector256<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail));
                 Vector256<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail), 8);
+            }
+            else if (AdvSimd.Arm64.IsSupported)
+            {
+                Vector128<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail));
+                Vector128<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail), 4);
+                Vector128<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail), 8);
+                Vector128<float>.Zero.StoreUnsafe(ref Unsafe.AsRef<float>(tail), 12);
             }
             else
             {
@@ -894,6 +962,14 @@ internal sealed class StandardV33Session
                             value.StoreUnsafe(ref Unsafe.AsRef<float>(mx + f));
                         }
                     }
+                    else if (AdvSimd.Arm64.IsSupported)
+                    {
+                        for (; f + 4 <= filters; f += 4)
+                        {
+                            Vector128<float> value = AdvSimd.Max(Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(mx + f)), Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(acc + f)));
+                            value.StoreUnsafe(ref Unsafe.AsRef<float>(mx + f));
+                        }
+                    }
 
                     for (; f < filters; f++)
                     {
@@ -926,6 +1002,17 @@ internal sealed class StandardV33Session
             {
                 Vector256<float> product = Avx.Multiply(aFactor, Vector256.LoadUnsafe(ref Unsafe.AsRef<float>(a + i)));
                 Vector256<float> value = Fma.MultiplyAdd(bFactor, Vector256.LoadUnsafe(ref Unsafe.AsRef<float>(b + i)), product);
+                value.StoreUnsafe(ref Unsafe.AsRef<float>(dst + i));
+            }
+        }
+        else if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> aFactor = Vector128.Create(aScale);
+            Vector128<float> bFactor = Vector128.Create(bScale);
+            for (; i + 4 <= length; i += 4)
+            {
+                Vector128<float> product = AdvSimd.Multiply(aFactor, Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(a + i)));
+                Vector128<float> value = AdvSimd.FusedMultiplyAdd(product, bFactor, Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(b + i)));
                 value.StoreUnsafe(ref Unsafe.AsRef<float>(dst + i));
             }
         }
@@ -965,6 +1052,18 @@ internal sealed class StandardV33Session
                     factor,
                     Vector256.LoadUnsafe(ref Unsafe.AsRef<float>(src + i)),
                     Vector256.LoadUnsafe(ref Unsafe.AsRef<float>(dst + i)));
+                value.StoreUnsafe(ref Unsafe.AsRef<float>(dst + i));
+            }
+        }
+        else if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> factor = Vector128.Create(scale);
+            for (; i + 4 <= length; i += 4)
+            {
+                Vector128<float> value = AdvSimd.FusedMultiplyAdd(
+                    Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(dst + i)),
+                    factor,
+                    Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(src + i)));
                 value.StoreUnsafe(ref Unsafe.AsRef<float>(dst + i));
             }
         }
@@ -1251,9 +1350,57 @@ internal sealed class StandardV33Session
         float mean = sum * _model.InvLength;
         float variance = MathF.Max((sumSq * _model.InvLength) - (mean * mean), 0f);
         float invStd = 1f / MathF.Sqrt(variance + _model.Epsilon);
-        ReadOnlySpan<float> gamma = _model.Ln1Gamma;
-        ReadOnlySpan<float> beta = _model.Ln1Beta;
-        for (int i = 0; i < StandardV33Model.Filters; i++)
+        // The reduction stays scalar so the mean matches the previous association.
+        // The affine scale is elementwise and is the part that vectorizes cleanly.
+        ApplyLayerNorm(source, dest, mean, invStd, _model.Ln1Gamma, _model.Ln1Beta);
+    }
+
+    private static void ApplyLayerNorm(ReadOnlySpan<float> source, Span<float> dest, float mean, float invStd, ReadOnlySpan<float> gamma, ReadOnlySpan<float> beta)
+    {
+        ref float src = ref MemoryMarshal.GetReference(source);
+        ref float dst = ref MemoryMarshal.GetReference(dest);
+        ref float gammaRef = ref MemoryMarshal.GetReference(gamma);
+        ref float betaRef = ref MemoryMarshal.GetReference(beta);
+        int length = source.Length;
+        int i = 0;
+        if (Avx512F.IsSupported)
+        {
+            Vector512<float> meanV = Vector512.Create(mean);
+            Vector512<float> invV = Vector512.Create(invStd);
+            for (; i + 16 <= length; i += 16)
+            {
+                Vector512<float> scale = Avx512F.Multiply(invV, Vector512.LoadUnsafe(ref gammaRef, (nuint)i));
+                Vector512<float> centered = Avx512F.Subtract(Vector512.LoadUnsafe(ref src, (nuint)i), meanV);
+                Avx512F.Add(Avx512F.Multiply(centered, scale), Vector512.LoadUnsafe(ref betaRef, (nuint)i))
+                    .StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+        else if (Avx2.IsSupported)
+        {
+            Vector256<float> meanV = Vector256.Create(mean);
+            Vector256<float> invV = Vector256.Create(invStd);
+            for (; i + 8 <= length; i += 8)
+            {
+                Vector256<float> scale = Avx.Multiply(invV, Vector256.LoadUnsafe(ref gammaRef, (nuint)i));
+                Vector256<float> centered = Avx.Subtract(Vector256.LoadUnsafe(ref src, (nuint)i), meanV);
+                Avx.Add(Avx.Multiply(centered, scale), Vector256.LoadUnsafe(ref betaRef, (nuint)i))
+                    .StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+        else if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> meanV = Vector128.Create(mean);
+            Vector128<float> invV = Vector128.Create(invStd);
+            for (; i + 4 <= length; i += 4)
+            {
+                Vector128<float> scale = AdvSimd.Multiply(invV, Vector128.LoadUnsafe(ref gammaRef, (nuint)i));
+                Vector128<float> centered = AdvSimd.Subtract(Vector128.LoadUnsafe(ref src, (nuint)i), meanV);
+                AdvSimd.Add(AdvSimd.Multiply(centered, scale), Vector128.LoadUnsafe(ref betaRef, (nuint)i))
+                    .StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+
+        for (; i < length; i++)
         {
             float scale = invStd * gamma[i];
             dest[i] = ((source[i] - mean) * scale) + beta[i];
@@ -1296,6 +1443,18 @@ internal sealed class StandardV33Session
                         value.StoreUnsafe(ref Unsafe.AsRef<float>(acc + j));
                     }
                 }
+                else if (AdvSimd.Arm64.IsSupported)
+                {
+                    Vector128<float> broadcast = Vector128.Create(weight);
+                    for (; j + 4 <= StandardV33Model.Classes; j += 4)
+                    {
+                        Vector128<float> value = AdvSimd.FusedMultiplyAdd(
+                            Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(acc + j)),
+                            broadcast,
+                            Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(row + j)));
+                        value.StoreUnsafe(ref Unsafe.AsRef<float>(acc + j));
+                    }
+                }
 
                 for (; j < StandardV33Model.Classes; j++)
                 {
@@ -1304,31 +1463,7 @@ internal sealed class StandardV33Session
             }
         }
 
-        Span<float> logits = _logits.AsSpan(0, StandardV33Model.Classes);
-        float max = float.NegativeInfinity;
-        for (int j = 0; j < logits.Length; j++)
-        {
-            max = MathF.Max(max, logits[j]);
-        }
-
-        if (float.IsNegativeInfinity(max))
-        {
-            max = 0f;
-        }
-
-        float sum = 0f;
-        for (int j = 0; j < logits.Length; j++)
-        {
-            float exp = MathF.Exp(logits[j] - max);
-            logits[j] = exp;
-            sum += exp;
-        }
-
-        float inv = 1f / sum;
-        for (int j = 0; j < logits.Length; j++)
-        {
-            dest[j] = logits[j] * inv;
-        }
+        SimdMath.Softmax(_logits.AsSpan(0, StandardV33Model.Classes), dest);
     }
 
     private static int ChooseThreads(int units)
@@ -1583,6 +1718,18 @@ internal sealed class StandardV33Session
             }
 
             max = HorizontalMax(acc);
+        }
+        else if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> acc = Vector128.Create(float.NegativeInfinity);
+            for (; j + 4 <= length; j += 4)
+            {
+                acc = AdvSimd.Max(acc, Vector128.LoadUnsafe(ref Unsafe.AsRef<float>(row + j)));
+            }
+
+            max = MathF.Max(
+                MathF.Max(acc.GetElement(0), acc.GetElement(1)),
+                MathF.Max(acc.GetElement(2), acc.GetElement(3)));
         }
 
         for (; j < length; j++)

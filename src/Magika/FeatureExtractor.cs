@@ -1,3 +1,6 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+
 namespace Magika;
 
 /// <summary>
@@ -29,21 +32,16 @@ internal static class FeatureExtractor
 
         ReadOnlySpan<byte> beg = StripStart(prefix);
         ReadOnlySpan<byte> end = StripEnd(suffix);
-        features.Fill((ushort)model.PaddingToken);
-
         int begCopy = Math.Min(model.BegSize, beg.Length);
-        for (int i = 0; i < begCopy; i++)
-        {
-            features[i] = beg[i];
-        }
-
         int endCopy = Math.Min(model.EndSize, end.Length);
         int dest = model.BegSize + model.EndSize - endCopy;
-        int src = end.Length - endCopy;
-        for (int i = 0; i < endCopy; i++)
+        if (begCopy < dest)
         {
-            features[dest + i] = end[src + i];
+            features.Slice(begCopy, dest - begCopy).Fill((ushort)model.PaddingToken);
         }
+
+        Widen(beg[..begCopy], features[..begCopy]);
+        Widen(end.Slice(end.Length - endCopy, endCopy), features.Slice(dest, endCopy));
     }
 
     internal static void ExtractBlocks(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, ModelDefinition model, Span<int> features)
@@ -55,21 +53,38 @@ internal static class FeatureExtractor
 
         ReadOnlySpan<byte> beg = StripStart(prefix);
         ReadOnlySpan<byte> end = StripEnd(suffix);
-        features.Fill(model.PaddingToken);
-
         int begCopy = Math.Min(model.BegSize, beg.Length);
-        for (int i = 0; i < begCopy; i++)
-        {
-            features[i] = beg[i];
-        }
-
         int endCopy = Math.Min(model.EndSize, end.Length);
         int dest = model.BegSize + model.EndSize - endCopy;
-        int src = end.Length - endCopy;
-        for (int i = 0; i < endCopy; i++)
+        if (begCopy < dest)
         {
-            features[dest + i] = end[src + i];
+            features.Slice(begCopy, dest - begCopy).Fill(model.PaddingToken);
         }
+
+        Widen(beg[..begCopy], features[..begCopy]);
+        Widen(end.Slice(end.Length - endCopy, endCopy), features.Slice(dest, endCopy));
+    }
+
+    /// <summary>
+    /// True when the stripped prefix can fill <see cref="ModelDefinition.MinFileSizeForDl"/>.
+    /// The end block is written at the tail of the feature vector, so it cannot change an index below <see cref="ModelDefinition.BegSize"/>.
+    /// Returns true when the gate sits in the end block, which this model does not do.
+    /// </summary>
+    internal static bool HasModelPrefix(ReadOnlySpan<byte> prefix, ModelDefinition model)
+    {
+        int needed = model.MinFileSizeForDl;
+        if ((uint)(needed - 1) >= (uint)model.BegSize)
+        {
+            return true;
+        }
+
+        int i = 0;
+        while (i < prefix.Length && IsWhitespace(prefix[i]))
+        {
+            i++;
+        }
+
+        return prefix.Length - i >= needed;
     }
 
     internal static bool HasEnoughContent(ReadOnlySpan<int> features, ModelDefinition model) =>
@@ -252,6 +267,74 @@ internal static class FeatureExtractor
 
     private static bool IsWhitespace(byte value) =>
         value is (byte)' ' or (byte)'\t' or (byte)'\n' or (byte)'\r' or 0x0C or 0x0B;
+
+    private static void Widen(ReadOnlySpan<byte> source, Span<ushort> destination)
+    {
+        ref byte src = ref MemoryMarshal.GetReference(source);
+        ref ushort dst = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated)
+        {
+            for (; i + 32 <= source.Length; i += 32)
+            {
+                (Vector256<ushort> lower, Vector256<ushort> upper) = Vector256.Widen(Vector256.LoadUnsafe(ref src, (nuint)i));
+                lower.StoreUnsafe(ref dst, (nuint)i);
+                upper.StoreUnsafe(ref dst, (nuint)(i + 16));
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 16 <= source.Length; i += 16)
+            {
+                (Vector128<ushort> lower, Vector128<ushort> upper) = Vector128.Widen(Vector128.LoadUnsafe(ref src, (nuint)i));
+                lower.StoreUnsafe(ref dst, (nuint)i);
+                upper.StoreUnsafe(ref dst, (nuint)(i + 8));
+            }
+        }
+
+        for (; i < source.Length; i++)
+        {
+            destination[i] = source[i];
+        }
+    }
+
+    private static void Widen(ReadOnlySpan<byte> source, Span<int> destination)
+    {
+        ref byte src = ref MemoryMarshal.GetReference(source);
+        ref int dst = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated)
+        {
+            for (; i + 32 <= source.Length; i += 32)
+            {
+                (Vector256<ushort> lower, Vector256<ushort> upper) = Vector256.Widen(Vector256.LoadUnsafe(ref src, (nuint)i));
+                (Vector256<uint> a, Vector256<uint> b) = Vector256.Widen(lower);
+                (Vector256<uint> c, Vector256<uint> d) = Vector256.Widen(upper);
+                a.As<uint, int>().StoreUnsafe(ref dst, (nuint)i);
+                b.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 8));
+                c.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 16));
+                d.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 24));
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i + 16 <= source.Length; i += 16)
+            {
+                (Vector128<ushort> lower, Vector128<ushort> upper) = Vector128.Widen(Vector128.LoadUnsafe(ref src, (nuint)i));
+                (Vector128<uint> a, Vector128<uint> b) = Vector128.Widen(lower);
+                (Vector128<uint> c, Vector128<uint> d) = Vector128.Widen(upper);
+                a.As<uint, int>().StoreUnsafe(ref dst, (nuint)i);
+                b.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 4));
+                c.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 8));
+                d.As<uint, int>().StoreUnsafe(ref dst, (nuint)(i + 12));
+            }
+        }
+
+        for (; i < source.Length; i++)
+        {
+            destination[i] = source[i];
+        }
+    }
 
     internal enum Utf8Kind
     {

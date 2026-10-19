@@ -1,13 +1,16 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 namespace Magika.Onnx;
 
 /// <summary>
-/// Vector tanh for the activations that follow Magika's dense and convolution layers.
+/// Vector tanh and softmax for the activations that follow Magika's dense and convolution layers.
 /// The exp reduction is the usual cephes argument split, evaluated with FMA.
+/// On a finite softmax input it stays within a few ULPs of <see cref="MathF.Exp"/>; non-finite
+/// logits take the scalar <see cref="MathF.Exp"/> path so infinities match that path exactly.
 /// </summary>
 internal static class SimdMath
 {
@@ -30,9 +33,86 @@ internal static class SimdMath
             return;
         }
 
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            Tanh128(source, dest);
+            return;
+        }
+
         for (int i = 0; i < source.Length; i++)
         {
             dest[i] = MathF.Tanh(source[i]);
+        }
+    }
+
+    /// <summary>
+    /// Writes softmax(<paramref name="logits"/>) to <paramref name="dest"/>.
+    /// Finite values use a vector cephes exp. The max is exact; exp is the same reduction as tanh.
+    /// </summary>
+    internal static void Softmax(Span<float> logits, Span<float> dest)
+    {
+        if (dest.Length < logits.Length)
+        {
+            throw new ArgumentException("Destination is shorter than the source.", nameof(dest));
+        }
+
+        if (logits.Length == 0)
+        {
+            return;
+        }
+
+        if (!AllFinite(logits))
+        {
+            SoftmaxScalar(logits, dest);
+            return;
+        }
+
+        if (Avx512F.IsSupported)
+        {
+            Softmax512(logits, dest);
+            return;
+        }
+
+        if (Avx2.IsSupported && Fma.IsSupported)
+        {
+            Softmax256(logits, dest);
+            return;
+        }
+
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            Softmax128(logits, dest);
+            return;
+        }
+
+        SoftmaxScalar(logits, dest);
+    }
+
+    private static void SoftmaxScalar(ReadOnlySpan<float> logits, Span<float> dest)
+    {
+        float max = float.NegativeInfinity;
+        for (int j = 0; j < logits.Length; j++)
+        {
+            max = MathF.Max(max, logits[j]);
+        }
+
+        if (float.IsNegativeInfinity(max))
+        {
+            max = 0f;
+        }
+
+        float sum = 0f;
+        for (int j = 0; j < logits.Length; j++)
+        {
+            float exp = MathF.Exp(logits[j] - max);
+            dest[j] = exp;
+            sum += exp;
+        }
+
+        float inv = 1f / sum;
+        for (int j = 0; j < logits.Length; j++)
+        {
+            dest[j] *= inv;
         }
     }
 
@@ -63,6 +143,24 @@ internal static class SimdMath
         for (; i + 8 <= length; i += 8)
         {
             Vector256<float> value = Tanh(Vector256.LoadUnsafe(ref src, (nuint)i));
+            value.StoreUnsafe(ref dst, (nuint)i);
+        }
+
+        for (; i < length; i++)
+        {
+            dest[i] = MathF.Tanh(source[i]);
+        }
+    }
+
+    private static void Tanh128(ReadOnlySpan<float> source, Span<float> dest)
+    {
+        ref float src = ref MemoryMarshal.GetReference(source);
+        ref float dst = ref MemoryMarshal.GetReference(dest);
+        int i = 0;
+        int length = source.Length;
+        for (; i + 4 <= length; i += 4)
+        {
+            Vector128<float> value = Tanh(Vector128.LoadUnsafe(ref src, (nuint)i));
             value.StoreUnsafe(ref dst, (nuint)i);
         }
 
@@ -148,6 +246,44 @@ internal static class SimdMath
         return Avx.Multiply(y, exponent.As<int, float>());
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static Vector128<float> Tanh(Vector128<float> x)
+    {
+        Vector128<float> signMask = Vector128.Create(-0.0f);
+        Vector128<float> sign = Vector128.BitwiseAnd(x, signMask);
+        Vector128<float> abs = Vector128.AndNot(x, signMask);
+        Vector128<float> exponent = Exp(AdvSimd.Multiply(abs, Vector128.Create(-2f)));
+        Vector128<float> one = Vector128<float>.One;
+        Vector128<float> value = AdvSimd.Arm64.Divide(AdvSimd.Subtract(one, exponent), AdvSimd.Add(one, exponent));
+        Vector128<float> saturated = AdvSimd.CompareGreaterThan(abs, Vector128.Create(9f));
+        value = Vector128.ConditionalSelect(saturated, one, value);
+        return Vector128.BitwiseOr(Vector128.AndNot(value, signMask), sign);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static Vector128<float> Exp(Vector128<float> x)
+    {
+        x = AdvSimd.Min(AdvSimd.Max(x, Vector128.Create(-87.3365478515625f)), Vector128.Create(88.3762626647949f));
+        Vector128<float> fx = AdvSimd.FusedMultiplyAdd(Vector128.Create(0.5f), x, Vector128.Create(1.4426950408889634f));
+        fx = AdvSimd.Floor(fx);
+        x = AdvSimd.FusedMultiplyAdd(x, fx, Vector128.Create(-0.693359375f));
+        x = AdvSimd.FusedMultiplyAdd(x, fx, Vector128.Create(2.12194440e-4f));
+        Vector128<float> z = AdvSimd.Multiply(x, x);
+        Vector128<float> y = Vector128.Create(1.9875691500E-4f);
+        y = AdvSimd.FusedMultiplyAdd(Vector128.Create(1.3981999507E-3f), y, x);
+        y = AdvSimd.FusedMultiplyAdd(Vector128.Create(8.3334519073E-3f), y, x);
+        y = AdvSimd.FusedMultiplyAdd(Vector128.Create(4.1665795894E-2f), y, x);
+        y = AdvSimd.FusedMultiplyAdd(Vector128.Create(1.6666665459E-1f), y, x);
+        y = AdvSimd.FusedMultiplyAdd(Vector128.Create(5.0000001201E-1f), y, x);
+        y = AdvSimd.FusedMultiplyAdd(x, y, z);
+        y = AdvSimd.Add(y, Vector128<float>.One);
+        Vector128<int> exponent = AdvSimd.ConvertToInt32RoundToZero(fx);
+        exponent = AdvSimd.Add(exponent, Vector128.Create(127));
+        // Vector128<int> has no AdvSimd shift; the lane bits are an IEEE exponent either way.
+        Vector128<uint> bits = AdvSimd.ShiftLeftLogical(exponent.As<int, uint>(), 23);
+        return AdvSimd.Multiply(y, bits.As<uint, float>());
+    }
+
     /// <summary>
     /// tanh-approximate GELU used by <c>standard_v3_3</c>, with the same multiply association as the graph:
     /// <c>x * (half * (1 + tanh(scale * (x + ((cubic * x) * x) * x))))</c>.
@@ -163,6 +299,12 @@ internal static class SimdMath
         if (Avx2.IsSupported && Fma.IsSupported)
         {
             Gelu256(data, cubic, scale, one, half);
+            return;
+        }
+
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            Gelu128(data, cubic, scale, one, half);
             return;
         }
 
@@ -226,5 +368,233 @@ internal static class SimdMath
         {
             data[i] = GeluScalar(data[i], cubic, scale, one, half);
         }
+    }
+
+    private static void Gelu128(Span<float> data, float cubic, float scale, float one, float half)
+    {
+        Vector128<float> cubicV = Vector128.Create(cubic);
+        Vector128<float> scaleV = Vector128.Create(scale);
+        Vector128<float> oneV = Vector128.Create(one);
+        Vector128<float> halfV = Vector128.Create(half);
+        ref float start = ref MemoryMarshal.GetReference(data);
+        int i = 0;
+        for (; i + 4 <= data.Length; i += 4)
+        {
+            Vector128<float> x = Vector128.LoadUnsafe(ref start, (nuint)i);
+            Vector128<float> cubicTerm = AdvSimd.Multiply(AdvSimd.Multiply(AdvSimd.Multiply(cubicV, x), x), x);
+            Vector128<float> inner = AdvSimd.Add(x, cubicTerm);
+            Vector128<float> tanh = Tanh(AdvSimd.Multiply(scaleV, inner));
+            Vector128<float> y = AdvSimd.Multiply(x, AdvSimd.Multiply(halfV, AdvSimd.Add(oneV, tanh)));
+            y.StoreUnsafe(ref start, (nuint)i);
+        }
+
+        for (; i < data.Length; i++)
+        {
+            data[i] = GeluScalar(data[i], cubic, scale, one, half);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Softmax512(Span<float> logits, Span<float> dest)
+    {
+        ref float src = ref MemoryMarshal.GetReference(logits);
+        int length = logits.Length;
+        int i = 0;
+        Vector512<float> vmax = Vector512.Create(float.NegativeInfinity);
+        for (; i + 16 <= length; i += 16)
+        {
+            vmax = Avx512F.Max(vmax, Vector512.LoadUnsafe(ref src, (nuint)i));
+        }
+
+        float max = FoldMax(vmax);
+        for (; i < length; i++)
+        {
+            max = MathF.Max(max, logits[i]);
+        }
+
+        Vector512<float> shift = Vector512.Create(max);
+        Vector512<float> sumV = Vector512<float>.Zero;
+        i = 0;
+        for (; i + 16 <= length; i += 16)
+        {
+            Vector512<float> exp = Exp(Avx512F.Subtract(Vector512.LoadUnsafe(ref src, (nuint)i), shift));
+            exp.StoreUnsafe(ref src, (nuint)i);
+            sumV = Avx512F.Add(sumV, exp);
+        }
+
+        float sum = FoldSum(sumV);
+        for (; i < length; i++)
+        {
+            float exp = MathF.Exp(logits[i] - max);
+            logits[i] = exp;
+            sum += exp;
+        }
+
+        Scale(logits, dest, sum);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Softmax256(Span<float> logits, Span<float> dest)
+    {
+        ref float src = ref MemoryMarshal.GetReference(logits);
+        int length = logits.Length;
+        int i = 0;
+        Vector256<float> vmax = Vector256.Create(float.NegativeInfinity);
+        for (; i + 8 <= length; i += 8)
+        {
+            vmax = Avx.Max(vmax, Vector256.LoadUnsafe(ref src, (nuint)i));
+        }
+
+        float max = FoldMax(vmax);
+        for (; i < length; i++)
+        {
+            max = MathF.Max(max, logits[i]);
+        }
+
+        Vector256<float> shift = Vector256.Create(max);
+        Vector256<float> sumV = Vector256<float>.Zero;
+        i = 0;
+        for (; i + 8 <= length; i += 8)
+        {
+            Vector256<float> exp = Exp(Avx.Subtract(Vector256.LoadUnsafe(ref src, (nuint)i), shift));
+            exp.StoreUnsafe(ref src, (nuint)i);
+            sumV = Avx.Add(sumV, exp);
+        }
+
+        float sum = FoldSum(sumV);
+        for (; i < length; i++)
+        {
+            float exp = MathF.Exp(logits[i] - max);
+            logits[i] = exp;
+            sum += exp;
+        }
+
+        Scale(logits, dest, sum);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void Softmax128(Span<float> logits, Span<float> dest)
+    {
+        ref float src = ref MemoryMarshal.GetReference(logits);
+        int length = logits.Length;
+        int i = 0;
+        Vector128<float> vmax = Vector128.Create(float.NegativeInfinity);
+        for (; i + 4 <= length; i += 4)
+        {
+            vmax = AdvSimd.Max(vmax, Vector128.LoadUnsafe(ref src, (nuint)i));
+        }
+
+        float max = FoldMax(vmax);
+        for (; i < length; i++)
+        {
+            max = MathF.Max(max, logits[i]);
+        }
+
+        Vector128<float> shift = Vector128.Create(max);
+        Vector128<float> sumV = Vector128<float>.Zero;
+        i = 0;
+        for (; i + 4 <= length; i += 4)
+        {
+            Vector128<float> exp = Exp(AdvSimd.Subtract(Vector128.LoadUnsafe(ref src, (nuint)i), shift));
+            exp.StoreUnsafe(ref src, (nuint)i);
+            sumV = AdvSimd.Add(sumV, exp);
+        }
+
+        float sum = FoldSum(sumV);
+        for (; i < length; i++)
+        {
+            float exp = MathF.Exp(logits[i] - max);
+            logits[i] = exp;
+            sum += exp;
+        }
+
+        Scale(logits, dest, sum);
+    }
+
+    private static void Scale(ReadOnlySpan<float> logits, Span<float> dest, float sum)
+    {
+        float inv = 1f / sum;
+        ref float src = ref MemoryMarshal.GetReference(logits);
+        ref float dst = ref MemoryMarshal.GetReference(dest);
+        int length = logits.Length;
+        int i = 0;
+        if (Avx512F.IsSupported)
+        {
+            Vector512<float> scale = Vector512.Create(inv);
+            for (; i + 16 <= length; i += 16)
+            {
+                Avx512F.Multiply(Vector512.LoadUnsafe(ref src, (nuint)i), scale).StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+        else if (Avx2.IsSupported)
+        {
+            Vector256<float> scale = Vector256.Create(inv);
+            for (; i + 8 <= length; i += 8)
+            {
+                Avx.Multiply(Vector256.LoadUnsafe(ref src, (nuint)i), scale).StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+        else if (AdvSimd.Arm64.IsSupported)
+        {
+            Vector128<float> scale = Vector128.Create(inv);
+            for (; i + 4 <= length; i += 4)
+            {
+                AdvSimd.Multiply(Vector128.LoadUnsafe(ref src, (nuint)i), scale).StoreUnsafe(ref dst, (nuint)i);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            dest[i] = logits[i] * inv;
+        }
+    }
+
+    private static float FoldMax(Vector512<float> value)
+    {
+        Vector256<float> folded = Avx.Max(value.GetLower(), value.GetUpper());
+        return FoldMax(folded);
+    }
+
+    private static float FoldMax(Vector256<float> value)
+    {
+        Vector128<float> lower = value.GetLower();
+        Vector128<float> upper = value.GetUpper();
+        return FoldMax(Sse.Max(lower, upper));
+    }
+
+    private static float FoldMax(Vector128<float> value)
+    {
+        float max = value.GetElement(0);
+        max = MathF.Max(max, value.GetElement(1));
+        max = MathF.Max(max, value.GetElement(2));
+        return MathF.Max(max, value.GetElement(3));
+    }
+
+    private static float FoldSum(Vector512<float> value)
+    {
+        Vector256<float> folded = Avx.Add(value.GetLower(), value.GetUpper());
+        return FoldSum(folded);
+    }
+
+    private static float FoldSum(Vector256<float> value)
+    {
+        Vector128<float> folded = Sse.Add(value.GetLower(), value.GetUpper());
+        return FoldSum(folded);
+    }
+
+    private static float FoldSum(Vector128<float> value) =>
+        (value.GetElement(0) + value.GetElement(1)) + (value.GetElement(2) + value.GetElement(3));
+
+    private static bool AllFinite(ReadOnlySpan<float> values)
+    {
+        for (int i = 0; i < values.Length; i++)
+        {
+            if (!float.IsFinite(values[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

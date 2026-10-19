@@ -5,9 +5,25 @@ namespace Magika;
 
 /// <summary>
 /// Reads the prefix and suffix blocks Magika features need into <see cref="ArrayPool{T}"/> buffers.
+/// Large files use two <see cref="RandomAccess"/> windows. A mapped view of those 4 KiB ends was slower than pread.
+/// A forward-only stream still has to be consumed, in large chunks, keeping the same tail block.
 /// </summary>
 internal static class ContentEnds
 {
+    /// <summary>Scan size for a non-seekable stream once the head and tail no longer fit in one window.</summary>
+    private const int ForwardScan = 256 * 1024;
+
+    internal static Window ReadAt(SafeFileHandle handle, long offset, int count) =>
+        ReadSlice(count, new HandleReader(handle), offset);
+
+    internal static Window ReadStreamAt(Stream stream, long offset, int count) =>
+        ReadSlice(count, new StreamReader(stream), offset);
+
+    internal static ValueTask<Lease> ReadAtAsync(SafeFileHandle handle, long offset, int count, long length, CancellationToken cancellationToken) =>
+        ReadSliceAsync(count, length, new HandleReaderAsync(handle), offset, cancellationToken);
+
+    internal static ValueTask<Lease> ReadStreamAtAsync(Stream stream, long offset, int count, long length, CancellationToken cancellationToken) =>
+        ReadSliceAsync(count, length, new StreamReaderAsync(stream), offset, cancellationToken);
     internal static Window ReadHandle(SafeFileHandle handle, long length, int blockSize) =>
         ReadRandom(length, blockSize, new HandleReader(handle));
 
@@ -46,11 +62,12 @@ internal static class ContentEnds
             return Lease.Single(buffer, filled, Math.Min(blockSize, filled), filled);
         }
 
-        byte[] chunk = ArrayPool<byte>.Shared.Rent(blockSize);
+        int chunkSize = ForwardChunk(blockSize);
+        byte[] chunk = ArrayPool<byte>.Shared.Rent(chunkSize);
         int extra;
         try
         {
-            extra = await stream.ReadAsync(chunk.AsMemory(0, blockSize), cancellationToken).ConfigureAwait(false);
+            extra = await stream.ReadAsync(chunk.AsMemory(0, chunkSize), cancellationToken).ConfigureAwait(false);
         }
         catch
         {
@@ -65,7 +82,7 @@ internal static class ContentEnds
             return Lease.Single(buffer, window, blockSize, window);
         }
 
-        if ((uint)extra > (uint)blockSize)
+        if ((uint)extra > (uint)chunkSize)
         {
             ArrayPool<byte>.Shared.Return(buffer);
             ArrayPool<byte>.Shared.Return(chunk);
@@ -84,13 +101,13 @@ internal static class ContentEnds
             length = (long)window + extra;
             while (true)
             {
-                int n = await stream.ReadAsync(chunk.AsMemory(0, blockSize), cancellationToken).ConfigureAwait(false);
+                int n = await stream.ReadAsync(chunk.AsMemory(0, chunkSize), cancellationToken).ConfigureAwait(false);
                 if (n == 0)
                 {
                     break;
                 }
 
-                if ((uint)n > (uint)blockSize)
+                if ((uint)n > (uint)chunkSize)
                 {
                     throw new IOException("Stream read returned an invalid count.");
                 }
@@ -138,11 +155,12 @@ internal static class ContentEnds
             return Window.Single(buffer, filled, Math.Min(blockSize, filled));
         }
 
-        byte[] chunk = ArrayPool<byte>.Shared.Rent(blockSize);
+        int chunkSize = ForwardChunk(blockSize);
+        byte[] chunk = ArrayPool<byte>.Shared.Rent(chunkSize);
         int extra;
         try
         {
-            extra = stream.Read(chunk.AsSpan(0, blockSize));
+            extra = stream.Read(chunk.AsSpan(0, chunkSize));
         }
         catch
         {
@@ -158,6 +176,13 @@ internal static class ContentEnds
             return Window.Single(buffer, window, blockSize);
         }
 
+        if ((uint)extra > (uint)chunkSize)
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            ArrayPool<byte>.Shared.Return(chunk);
+            throw new IOException("Stream read returned an invalid count.");
+        }
+
         byte[] prefix = ArrayPool<byte>.Shared.Rent(blockSize);
         byte[] suffix = ArrayPool<byte>.Shared.Rent(blockSize);
         buffer.AsSpan(0, blockSize).CopyTo(prefix);
@@ -169,10 +194,15 @@ internal static class ContentEnds
             length = (long)window + extra;
             while (true)
             {
-                int n = stream.Read(chunk.AsSpan(0, blockSize));
+                int n = stream.Read(chunk.AsSpan(0, chunkSize));
                 if (n == 0)
                 {
                     break;
+                }
+
+                if ((uint)n > (uint)chunkSize)
+                {
+                    throw new IOException("Stream read returned an invalid count.");
                 }
 
                 AppendTail(suffix, blockSize, chunk.AsSpan(0, n));
@@ -365,6 +395,42 @@ internal static class ContentEnds
 
             read += n;
         }
+    }
+
+    private static int ForwardChunk(int blockSize) => Math.Max(blockSize, ForwardScan);
+
+    private static Window ReadSlice<TReader>(int count, TReader reader, long offset)
+        where TReader : IRandomReader
+    {
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(count);
+        try
+        {
+            reader.Read(buffer.AsSpan(0, count), offset);
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            throw;
+        }
+
+        return Window.Single(buffer, count, count);
+    }
+
+    private static async ValueTask<Lease> ReadSliceAsync<TReader>(int count, long length, TReader reader, long offset, CancellationToken cancellationToken)
+        where TReader : IAsyncRandomReader
+    {
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(count);
+        try
+        {
+            await reader.ReadAsync(buffer.AsMemory(0, count), offset, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+            throw;
+        }
+
+        return Lease.Single(buffer, count, count, length);
     }
 
     private static void AppendTail(byte[] suffix, int block, byte[] incoming, int count) =>

@@ -17,11 +17,12 @@
     <ProjectReference Include="..\Magika\Magika.csproj" />
   </ItemGroup>
 
-  <!-- Native AOT folds X86.IsSupported into a constant. Without an instruction set,
+  <!-- Native AOT folds IsSupported into a constant. Without an instruction set,
        linux-x64 and win-x64 publish as SSE and the AVX2 / AVX-512 kernels are removed.
-       MagikaIsa is avx2 or avx512. It is applied here, not as a comma-separated
-       -p:IlcInstructionSet list (MSBuild splits property values on commas).
-       x64 PublishAot defaults to avx2. osx-arm64 is unchanged. -->
+       MagikaIsa is one token: avx2 or avx512 on x64, apple-m1 on osx-arm64.
+       It is applied here, not as a comma-separated -p:IlcInstructionSet list
+       (MSBuild splits property values on commas). apple-m1 is the osx-arm64 baseline
+       (AdvSimd / armv8.5-a) and is what the single macOS zip is built with. -->
   <PropertyGroup Condition="'$(PublishAot)' == 'true' and $([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))">
     <_MagikaIsa Condition="'$(MagikaIsa)' == ''">avx2</_MagikaIsa>
     <_MagikaIsa Condition="'$(MagikaIsa)' != ''">$(MagikaIsa)</_MagikaIsa>
@@ -32,20 +33,29 @@
     <IlcMaxVectorTBitWidth Condition="'$(_MagikaIsa)' == 'avx512'">512</IlcMaxVectorTBitWidth>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(PublishAot)' == 'true' and '$(RuntimeIdentifier)' == 'osx-arm64'">
+    <_MagikaIsa Condition="'$(MagikaIsa)' == ''">apple-m1</_MagikaIsa>
+    <_MagikaIsa Condition="'$(MagikaIsa)' != ''">$(MagikaIsa)</_MagikaIsa>
+    <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'apple-m1'">apple-m1</IlcInstructionSet>
+  </PropertyGroup>
+
   <Target Name="ValidateMagikaIsa" BeforeTargets="PrepareForBuild;Build;Publish;IlcCompile;WriteIlcRspFileForCompilation"
           Condition="'$(PublishAot)' == 'true'">
     <Error Condition="$([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64')) and '$(_MagikaIsa)' != 'avx2' and '$(_MagikaIsa)' != 'avx512'"
            Text="MagikaIsa must be avx2 or avx512 for Native AOT x64. The project sets IlcInstructionSet from MagikaIsa." />
-    <Error Condition="'$(MagikaIsa)' != '' and !$([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))"
-           Text="MagikaIsa applies only to Native AOT linux-x64 and win-x64." />
+    <Error Condition="'$(RuntimeIdentifier)' == 'osx-arm64' and '$(_MagikaIsa)' != 'apple-m1'"
+           Text="MagikaIsa must be apple-m1 for Native AOT osx-arm64. The project sets IlcInstructionSet from MagikaIsa." />
+    <Error Condition="'$(MagikaIsa)' != '' and !$([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64')) and '$(RuntimeIdentifier)' != 'osx-arm64'"
+           Text="MagikaIsa applies only to Native AOT linux-x64, win-x64, and osx-arm64." />
   </Target>
 
   <Target Name="ApplyMagikaInstructionSet" BeforeTargets="WriteIlcRspFileForCompilation;IlcCompile"
-          Condition="'$(PublishAot)' == 'true' and $([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64'))">
+          Condition="'$(PublishAot)' == 'true' and ($([System.String]::Copy('$(RuntimeIdentifier)').EndsWith('-x64')) or '$(RuntimeIdentifier)' == 'osx-arm64')">
     <PropertyGroup>
       <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx2'">avx2</IlcInstructionSet>
       <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'avx512'">avx512</IlcInstructionSet>
       <IlcMaxVectorTBitWidth Condition="'$(_MagikaIsa)' == 'avx512'">512</IlcMaxVectorTBitWidth>
+      <IlcInstructionSet Condition="'$(_MagikaIsa)' == 'apple-m1'">apple-m1</IlcInstructionSet>
     </PropertyGroup>
     <Message Importance="high" Text="Native AOT IlcInstructionSet=$(IlcInstructionSet) IlcMaxVectorTBitWidth=$(IlcMaxVectorTBitWidth) for $(RuntimeIdentifier)." />
   </Target>

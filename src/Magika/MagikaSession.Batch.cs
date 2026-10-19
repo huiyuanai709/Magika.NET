@@ -561,15 +561,29 @@ public sealed partial class MagikaSession
                 return Prepared.Done(special);
             }
 
-            using SafeFileHandle handle = File.OpenHandle(path);
+            using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
             long length = RandomAccess.GetLength(handle);
             if (length == 0)
             {
                 return Prepared.Done(Heuristic(path, "empty", score: 1f));
             }
 
-            using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, _model.BlockSize);
-            return FromEnds(path, ends.Prefix, ends.Suffix, length, features);
+            int blockSize = _model.BlockSize;
+            if (length <= (long)blockSize * 2)
+            {
+                using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, blockSize);
+                return FromEnds(path, ends.Prefix, ends.Suffix, length, features);
+            }
+
+            int block = blockSize;
+            using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
+            if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+            {
+                return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f));
+            }
+
+            using ContentEnds.Window tail = ContentEnds.ReadAt(handle, length - block, block);
+            return FromEnds(path, head.Prefix, tail.Prefix, length, features);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or ArgumentException)
         {
@@ -588,15 +602,34 @@ public sealed partial class MagikaSession
                 return Prepared.Done(special);
             }
 
-            using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+            using SafeFileHandle handle = File.OpenHandle(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                FileOptions.Asynchronous | FileOptions.RandomAccess);
             long length = RandomAccess.GetLength(handle);
             if (length == 0)
             {
                 return Prepared.Done(Heuristic(path, "empty", score: 1f));
             }
 
-            using ContentEnds.Lease ends = await ContentEnds.ReadHandleAsync(handle, length, _model.BlockSize, cancellationToken).ConfigureAwait(false);
-            return FromEnds(path, ends.Prefix, ends.Suffix, length, staging.AsSpan(offset, _model.FeaturesSize));
+            int blockSize = _model.BlockSize;
+            if (length <= (long)blockSize * 2)
+            {
+                using ContentEnds.Lease ends = await ContentEnds.ReadHandleAsync(handle, length, blockSize, cancellationToken).ConfigureAwait(false);
+                return FromEnds(path, ends.Prefix, ends.Suffix, length, staging.AsSpan(offset, _model.FeaturesSize));
+            }
+
+            int block = blockSize;
+            using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+            if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
+            {
+                return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f));
+            }
+
+            using ContentEnds.Lease tail = await ContentEnds.ReadAtAsync(handle, length - block, block, length, cancellationToken).ConfigureAwait(false);
+            return FromEnds(path, head.Prefix, tail.Prefix, length, staging.AsSpan(offset, _model.FeaturesSize));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException or ArgumentException)
         {
@@ -606,7 +639,7 @@ public sealed partial class MagikaSession
 
     private Prepared FromEnds(string path, ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, Span<ushort> features)
     {
-        if (!_options.UseModel)
+        if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(prefix, _model))
         {
             return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f));
         }

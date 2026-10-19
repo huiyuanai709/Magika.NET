@@ -20,11 +20,14 @@ public class NativeAotIsaTests
     }
 
     [Fact]
-    public void PublishAot_Arm64LeavesX64InstructionSetUnset()
+    public void PublishAot_OsxArm64SelectsAppleM1()
     {
         (string instructionSet, string vectorWidth) = Evaluate("osx-arm64", isa: null);
-        Assert.Equal("", instructionSet);
+        Assert.Equal("apple-m1", instructionSet);
         Assert.Equal("", vectorWidth);
+        (string explicitSet, string explicitWidth) = Evaluate("osx-arm64", "apple-m1");
+        Assert.Equal("apple-m1", explicitSet);
+        Assert.Equal("", explicitWidth);
     }
 
     [Fact]
@@ -36,11 +39,11 @@ public class NativeAotIsaTests
     }
 
     [Fact]
-    public void PublishAot_RejectsIsaOnArm64()
+    public void PublishAot_RejectsX64IsaOnArm64()
     {
         ProcessResult result = Run(CliProject(), "ValidateMagikaIsa", "osx-arm64", "avx512");
         Assert.NotEqual(0, result.ExitCode);
-        Assert.Contains("linux-x64 and win-x64", result.Text, StringComparison.Ordinal);
+        Assert.Contains("apple-m1", result.Text, StringComparison.Ordinal);
     }
 
     private static (string InstructionSet, string VectorWidth) Evaluate(string rid, string? isa)

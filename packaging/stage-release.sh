@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Stage a Native AOT publish directory into a release zip.
 # Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [isa]
-# isa is avx2 or avx512 for linux-x64 and win-x64, and omitted for osx-arm64.
+# isa is avx2 or avx512 for linux-x64 and win-x64, and apple-m1 for osx-arm64.
+# The macOS zip name stays osx-arm64 (one Apple Silicon SKU).
 # The zip contains magika (or magika.exe), RUN.txt, LICENSE, THIRD-PARTY-NOTICES.md, and VERSION.txt.
 set -euo pipefail
 
 if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
-  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [avx2|avx512]" >&2
+  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [avx2|avx512|apple-m1]" >&2
   exit 2
 fi
 
@@ -37,12 +38,15 @@ case "$rid" in
     esac
     ;;
   osx-arm64)
-    if [ -n "$isa" ]; then
-      echo "osx-arm64 does not take an instruction set" >&2
-      exit 2
-    fi
+    case "$isa" in
+      ""|apple-m1) ;;
+      *)
+        echo "osx-arm64 isa must be apple-m1" >&2
+        exit 2
+        ;;
+    esac
     sku="$rid"
-    isa="arm64"
+    isa="apple-m1"
     ;;
 esac
 

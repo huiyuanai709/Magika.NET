@@ -99,10 +99,10 @@ jobs:
             rid: linux-x64
             isa: avx512
             sku: linux-x64-avx512
-          # macos-latest is Apple Silicon. osx-arm64 Native AOT links with the macOS SDK.
+          # macos-latest is Apple Silicon. One zip; MagikaIsa=apple-m1 keeps AdvSimd in the AOT binary.
           - os: macos-latest
             rid: osx-arm64
-            isa: none
+            isa: apple-m1
             sku: osx-arm64
     steps:
       - uses: actions/checkout@v4
@@ -155,8 +155,9 @@ jobs:
             --output "artifacts/$SKU"
           )
           # MagikaIsa is a single token. Do not pass IlcInstructionSet as a comma list;
-          # MSBuild splits -p values on commas. The project maps avx2 to IlcInstructionSet=avx2
-          # and avx512 to IlcInstructionSet=avx512 plus IlcMaxVectorTBitWidth=512.
+          # MSBuild splits -p values on commas. The project maps avx2 to IlcInstructionSet=avx2,
+          # avx512 to IlcInstructionSet=avx512 plus IlcMaxVectorTBitWidth=512,
+          # and apple-m1 to IlcInstructionSet=apple-m1 for osx-arm64.
           if [ -n "$ISA" ] && [ "$ISA" != "none" ]; then
             args+=(-p:MagikaIsa="$ISA")
           fi
