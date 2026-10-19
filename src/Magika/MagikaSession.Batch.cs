@@ -318,8 +318,8 @@ public sealed partial class MagikaSession
             return configured;
         }
 
-        // Several narrow lanes beat one lane that fans the convolution across every core.
-        return Math.Min(8, Math.Max(1, Environment.ProcessorCount));
+        // One lane per processor. Several narrow lanes beat one lane that fans the convolution across every core.
+        return Math.Max(1, Environment.ProcessorCount);
     }
 
     private InferenceLane[] Pool()

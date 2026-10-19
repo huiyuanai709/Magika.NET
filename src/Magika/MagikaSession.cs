@@ -48,9 +48,9 @@ public sealed partial class MagikaSession
             throw new ArgumentOutOfRangeException(nameof(options), options.BatchSize, "BatchSize must be from 1 to 64.");
         }
 
-        if (options.InferenceWorkers is < 0 or > 32)
+        if (options.InferenceWorkers < 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(options), options.InferenceWorkers, "InferenceWorkers must be from 0 to 32.");
+            throw new ArgumentOutOfRangeException(nameof(options), options.InferenceWorkers, "InferenceWorkers must be at least 0. 0 uses one lane per processor.");
         }
 
         ModelDefinition model = ModelDefinition.LoadDefault();

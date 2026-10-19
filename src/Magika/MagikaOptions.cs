@@ -24,11 +24,11 @@ public sealed class MagikaOptions
 
     /// <summary>
     /// How many inference lanes multi-file identification may run at once.
-    /// <c>0</c> (the default) uses one lane per processor, capped at 8.
+    /// <c>0</c> (the default) uses one lane per processor.
     /// Each lane is a managed ONNX session that shares the model weights and keeps its own activation scratch.
     /// Lanes are created on the first multi-file call. The convolution product's thread count is split across lanes.
     /// Single-file identification always uses one lane and does not create the pool.
-    /// Must be from 0 to 32.
+    /// Negative values are rejected. An explicit count is used as given.
     /// </summary>
     public int InferenceWorkers { get; init; }
 }

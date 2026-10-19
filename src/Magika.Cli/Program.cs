@@ -57,9 +57,9 @@ static async Task<int> RunAsync(string[] args)
 
                 break;
             case "--workers":
-                if (i + 1 >= args.Length || !int.TryParse(args[++i], out workers))
+                if (i + 1 >= args.Length || !int.TryParse(args[++i], out workers) || workers < 0)
                 {
-                    Console.Error.WriteLine("Missing or invalid value for --workers (0..32).");
+                    Console.Error.WriteLine("Missing or invalid value for --workers. Use 0 for one lane per processor, or a positive count.");
                     return 2;
                 }
 
@@ -218,7 +218,7 @@ static void PrintHelp()
 
         The model is Magika standard_v3_3, executed by a managed ONNX interpreter.
         Several files are read concurrently, then scored in batches (default batch size 8).
-        --workers 0 uses one inference lane per processor, capped at 8.
+        --workers 0 uses one inference lane per processor.
         Each lane is its own managed session. There is no native ONNX runtime.
         """);
 }
