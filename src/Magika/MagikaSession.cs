@@ -85,34 +85,57 @@ public sealed class MagikaSession
         }
     }
 
+    /// <summary>
+    /// Identifies a stream without blocking the caller on IO.
+    /// Cancellation is observed while bytes are read. Inference itself is synchronous and runs to completion.
+    /// A seekable stream is read at the start and end only, and its position is restored.
+    /// A non-seekable stream is consumed to the end; only the first and last block are kept.
+    /// </summary>
+    public async Task<MagikaResult> IdentifyAsync(Stream stream, string? path = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (!stream.CanRead)
+        {
+            throw new ArgumentException("Stream must be readable.", nameof(stream));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!stream.CanSeek)
+        {
+            using ContentEnds.Lease ends = await ContentEnds.ReadForwardAsync(stream, _model.BlockSize, cancellationToken).ConfigureAwait(false);
+            if (ends.Length == 0)
+            {
+                return Heuristic(path, "empty", score: 1f);
+            }
+
+            return IdentifyLease(ends, ends.Length, path);
+        }
+
+        long position = stream.Position;
+        try
+        {
+            long length = stream.Length;
+            if (length == 0)
+            {
+                return Heuristic(path, "empty", score: 1f);
+            }
+
+            using ContentEnds.Lease ends = await ContentEnds.ReadSeekableAsync(stream, length, _model.BlockSize, cancellationToken).ConfigureAwait(false);
+            return IdentifyLease(ends, length, path);
+        }
+        finally
+        {
+            stream.Position = position;
+        }
+    }
+
     /// <summary>Identifies a filesystem path. Directories and, when requested, symlinks are reported as such.</summary>
     public MagikaResult IdentifyPath(string path)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
-        FileAttributes attributes;
-        try
+        if (ClassifySpecialPath(path) is MagikaResult special)
         {
-            attributes = File.GetAttributes(path);
-        }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
-        {
-            throw new FileNotFoundException($"Could not find '{path}'.", path, ex);
-        }
-
-        bool link = (attributes & FileAttributes.ReparsePoint) != 0;
-        if (link && !_options.FollowSymlinks)
-        {
-            return Heuristic(path, "symlink", score: 1f);
-        }
-
-        if (Directory.Exists(path))
-        {
-            return Heuristic(path, "directory", score: 1f);
-        }
-
-        if (!File.Exists(path))
-        {
-            return Heuristic(path, "unsupported", score: 1f);
+            return special;
         }
 
         // pread of the head and tail. A mapped view was slower for the 4 KiB block.
@@ -125,6 +148,23 @@ public sealed class MagikaSession
 
         using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, _model.BlockSize);
         return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
+    }
+
+    /// <summary>
+    /// Identifies a filesystem path without blocking the caller on IO.
+    /// Cancellation is observed while bytes are read. Inference itself is synchronous and runs to completion.
+    /// Directories and, when requested, symlinks are reported as such.
+    /// </summary>
+    public Task<MagikaResult> IdentifyPathAsync(string path, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (ClassifySpecialPath(path) is MagikaResult special)
+        {
+            return Task.FromResult(special);
+        }
+
+        return IdentifyFileAsync(path, cancellationToken);
     }
 
     internal bool EmbeddingFused => _session.EmbeddingFused;
@@ -187,6 +227,54 @@ public sealed class MagikaSession
         }
 
         return DecideScores(scores, path);
+    }
+
+    private MagikaResult IdentifyLease(ContentEnds.Lease ends, long length, string? path) =>
+        IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
+
+    private async Task<MagikaResult> IdentifyFileAsync(string path, CancellationToken cancellationToken)
+    {
+        // Overlapped IO where the OS supports it. The window matches the sync pread path.
+        using SafeFileHandle handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+        long length = RandomAccess.GetLength(handle);
+        if (length == 0)
+        {
+            return Heuristic(path, "empty", score: 1f);
+        }
+
+        using ContentEnds.Lease ends = await ContentEnds.ReadHandleAsync(handle, length, _model.BlockSize, cancellationToken).ConfigureAwait(false);
+        return IdentifyLease(ends, length, path);
+    }
+
+    private MagikaResult? ClassifySpecialPath(string path)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new FileNotFoundException($"Could not find '{path}'.", path, ex);
+        }
+
+        bool link = (attributes & FileAttributes.ReparsePoint) != 0;
+        if (link && !_options.FollowSymlinks)
+        {
+            return Heuristic(path, "symlink", score: 1f);
+        }
+
+        if (Directory.Exists(path))
+        {
+            return Heuristic(path, "directory", score: 1f);
+        }
+
+        if (!File.Exists(path))
+        {
+            return Heuristic(path, "unsupported", score: 1f);
+        }
+
+        return null;
     }
 
     private static MagikaResult Heuristic(string? path, string label, float score) =>

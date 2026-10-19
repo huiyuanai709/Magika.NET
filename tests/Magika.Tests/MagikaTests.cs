@@ -1,3 +1,5 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using Xunit;
@@ -402,6 +404,128 @@ public class MagikaTests
     }
 
     [Fact]
+    public async Task IdentifyAsync_MatchesSyncForPathSeekableAndForwardStreams()
+    {
+        MagikaSession session = MagikaSession.Create();
+        int block = session.Model.BlockSize;
+        int[] sizes = [0, 1, block - 1, block, block + 1, (block * 2) - 1, block * 2, (block * 2) + 1, (block * 2) + 100, block * 5];
+        string directory = Path.Combine(Path.GetTempPath(), "magika-async-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            Assert.Equal("directory", (await session.IdentifyPathAsync(directory)).ContentType.Label);
+            foreach (string name in new[] { "pdf", "png", "zip", "text", "javascript", "elf", "ambiguous" })
+            {
+                byte[] fixture = File.ReadAllBytes(Fixture(name + ".bin"));
+                MagikaResult expected = session.Identify(fixture);
+                using MemoryStream seekable = new(fixture, writable: false);
+                seekable.Position = 2;
+                MagikaResult fromSeekable = await session.IdentifyAsync(seekable, name);
+                AssertSame(expected, fromSeekable, $"fixture seekable {name}");
+                Assert.Equal(2, seekable.Position);
+
+                using ChunkedStream forward = new(fixture, chunk: 3);
+                AssertSame(expected, await session.IdentifyAsync(forward, name), $"fixture forward {name}");
+            }
+
+            foreach (int size in sizes)
+            {
+                byte[] data = Pattern(size);
+                MagikaResult expected = session.Identify(data);
+                string path = Path.Combine(directory, size + ".bin");
+                await File.WriteAllBytesAsync(path, data);
+
+                MagikaResult fromPath = await session.IdentifyPathAsync(path);
+                AssertSame(expected, fromPath, $"async path {size}");
+                Assert.Equal(path, fromPath.Path);
+
+                using MemoryStream seekable = new(data, writable: false);
+                if (data.Length > 0)
+                {
+                    seekable.Position = Math.Min(3, data.Length);
+                }
+
+                long mark = seekable.Position;
+                MagikaResult fromSeekable = await session.IdentifyAsync(seekable, "seekable");
+                AssertSame(expected, fromSeekable, $"async seekable {size}");
+                Assert.Equal(mark, seekable.Position);
+
+                using ChunkedStream oneByte = new(data, chunk: 1);
+                AssertSame(expected, await session.IdentifyAsync(oneByte, "chunk1"), $"async chunk1 {size}");
+
+                using ChunkedStream wide = new(data, chunk: 8192);
+                AssertSame(expected, await session.IdentifyAsync(wide, "chunkwide"), $"async chunkwide {size}");
+            }
+
+            string pdf = Path.Combine(directory, "sample.pdf");
+            byte[] pdfBytes = File.ReadAllBytes(Fixture("pdf.bin"));
+            await File.WriteAllBytesAsync(pdf, pdfBytes);
+            string link = pdf + ".link";
+            File.CreateSymbolicLink(link, pdf);
+            Assert.Equal("pdf", (await session.IdentifyPathAsync(link)).ContentType.Label);
+            MagikaSession noFollow = MagikaSession.Create(new MagikaOptions { FollowSymlinks = false });
+            Assert.Equal("symlink", (await noFollow.IdentifyPathAsync(link)).ContentType.Label);
+
+            using CancellationTokenSource canceled = new();
+            canceled.Cancel();
+            using FileStream held = File.OpenRead(pdf);
+            held.Position = 4;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.IdentifyPathAsync(pdf, canceled.Token));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.IdentifyAsync(held, pdf, canceled.Token));
+            Assert.Equal(4, held.Position);
+
+            await using CancelOnReadStream cancelOnRead = new(pdfBytes);
+            long cancelMark = cancelOnRead.Position;
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.IdentifyAsync(cancelOnRead, "cancel"));
+            Assert.Equal(cancelMark, cancelOnRead.Position);
+            Assert.Equal("pdf", (await session.IdentifyAsync(new MemoryStream(pdfBytes))).ContentType.Label);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task IdentifyAsync_PooledReadsStayDistinctAcrossTasks()
+    {
+        MagikaSession session = MagikaSession.Create();
+        byte[] pdf = File.ReadAllBytes(Fixture("pdf.bin"));
+        byte[] text = File.ReadAllBytes(Fixture("text.bin"));
+        string directory = Path.Combine(Path.GetTempPath(), "magika-async-parallel-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        string pdfPath = Path.Combine(directory, "sample.pdf");
+        string textPath = Path.Combine(directory, "sample.txt");
+        await File.WriteAllBytesAsync(pdfPath, pdf);
+        await File.WriteAllBytesAsync(textPath, text);
+        try
+        {
+            Task[] tasks = Enumerable.Range(0, 4).Select(async _ =>
+            {
+                Assert.Equal("pdf", (await session.IdentifyPathAsync(pdfPath)).ContentType.Label);
+                Assert.Equal("txt", (await session.IdentifyPathAsync(textPath)).ContentType.Label);
+                Assert.Equal("pdf", (await session.IdentifyAsync(new MemoryStream(pdf))).ContentType.Label);
+                using ChunkedStream forward = new(text, chunk: 3);
+                Assert.Equal("txt", (await session.IdentifyAsync(forward)).ContentType.Label);
+            }).ToArray();
+            await Task.WhenAll(tasks);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void AsyncIdentify_IsCompiledWithRuntimeAsync()
+    {
+        AssertRuntimeAsync(typeof(MagikaSession).GetMethod(nameof(MagikaSession.IdentifyAsync))!);
+        AssertRuntimeAsync(typeof(MagikaSession).GetMethod("IdentifyFileAsync", BindingFlags.Instance | BindingFlags.NonPublic)!);
+        AssertRuntimeAsync(typeof(ContentEnds).GetMethod("ReadForwardAsync", BindingFlags.Static | BindingFlags.NonPublic)!);
+        AssertRuntimeAsync(typeof(ContentEnds).GetMethod("ReadExactAtAsync", BindingFlags.Static | BindingFlags.NonPublic)!);
+    }
+
+    [Fact]
     public void Inference_IsCpuFastEnoughForInteractiveUse()
     {
         MagikaSession session = MagikaSession.Create();
@@ -476,6 +600,12 @@ public class MagikaTests
 
         public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
 
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return new ValueTask<int>(Read(buffer.Span));
+        }
+
         public override int Read(Span<byte> buffer)
         {
             int remaining = _data.Length - _position;
@@ -489,6 +619,56 @@ public class MagikaTests
             _position += n;
             return n;
         }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private static void AssertRuntimeAsync(MethodInfo method)
+    {
+        Assert.NotNull(method);
+        Assert.Null(method.GetCustomAttribute<AsyncStateMachineAttribute>());
+        Assert.True(
+            method.MethodImplementationFlags.HasFlag(MethodImplAttributes.Async),
+            $"{method.Name} flags were {method.MethodImplementationFlags}");
+    }
+
+    private sealed class CancelOnReadStream : Stream
+    {
+        private readonly byte[] _data;
+        private long _position;
+
+        public CancelOnReadStream(byte[] data)
+        {
+            _data = data;
+            _position = Math.Min(5, data.Length);
+        }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => false;
+
+        public override long Length => _data.Length;
+
+        public override long Position
+        {
+            get => _position;
+            set => _position = value;
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new OperationCanceledException();
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException(cancellationToken);
 
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
 

@@ -15,6 +15,8 @@
     <PackageTags>magika;content-type;onnx;file-type</PackageTags>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- https://learn.microsoft.com/dotnet/core/whats-new/dotnet-11/runtime -->
+    <Features>$(Features);runtime-async=on</Features>
   </PropertyGroup>
 
   <ItemGroup>

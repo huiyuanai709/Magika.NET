@@ -2,9 +2,9 @@ using System.Globalization;
 using System.Text;
 using Magika;
 
-return Run(args);
+return await RunAsync(args);
 
-static int Run(string[] args)
+static async Task<int> RunAsync(string[] args)
 {
     PredictionMode mode = PredictionMode.HighConfidence;
     bool json = false;
@@ -74,7 +74,7 @@ static int Run(string[] args)
     {
         try
         {
-            MagikaResult result = session.IdentifyPath(path);
+            MagikaResult result = await session.IdentifyPathAsync(path).ConfigureAwait(false);
             Console.WriteLine(json ? ToJson(path, result) : ToText(path, result));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException)

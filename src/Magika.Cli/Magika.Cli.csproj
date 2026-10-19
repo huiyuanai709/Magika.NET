@@ -9,6 +9,8 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>magika</ToolCommandName>
     <Description>Command-line file content-type detection using Magika.NET.</Description>
+    <!-- https://learn.microsoft.com/dotnet/core/whats-new/dotnet-11/runtime -->
+    <Features>$(Features);runtime-async=on</Features>
   </PropertyGroup>
 
   <ItemGroup>
