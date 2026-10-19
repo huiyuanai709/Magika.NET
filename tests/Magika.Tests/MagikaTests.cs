@@ -258,6 +258,80 @@ public class MagikaTests
     }
 
     [Fact]
+    public void Identify_HeadAndTailMatchFullBufferAcrossBoundaries()
+    {
+        MagikaSession session = MagikaSession.Create();
+        int block = session.Model.BlockSize;
+        int[] sizes = [0, 1, block - 1, block, block + 1, (block * 2) - 1, block * 2, (block * 2) + 1, (block * 2) + 100, block * 5];
+        string directory = Path.Combine(Path.GetTempPath(), "magika-ends-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            foreach (int size in sizes)
+            {
+                byte[] data = Pattern(size);
+                MagikaResult expected = session.Identify(data);
+
+                using MemoryStream seekable = new(data, writable: false);
+                if (data.Length > 0)
+                {
+                    seekable.Position = Math.Min(3, data.Length);
+                }
+
+                long mark = seekable.Position;
+                MagikaResult fromSeekable = session.Identify(seekable, "seekable");
+                AssertSame(expected, fromSeekable, $"seekable {size}");
+                Assert.Equal(mark, seekable.Position);
+
+                using ChunkedStream oneByte = new(data, chunk: 1);
+                AssertSame(expected, session.Identify(oneByte, "chunk1"), $"chunk1 {size}");
+
+                using ChunkedStream wide = new(data, chunk: 8192);
+                AssertSame(expected, session.Identify(wide, "chunkwide"), $"chunkwide {size}");
+
+                string path = Path.Combine(directory, size + ".bin");
+                File.WriteAllBytes(path, data);
+                MagikaResult fromPath = session.IdentifyPath(path);
+                AssertSame(expected, fromPath, $"path {size}");
+                Assert.Equal(path, fromPath.Path);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void IdentifyPath_PooledReadsStayDistinctAcrossThreads()
+    {
+        MagikaSession session = MagikaSession.Create();
+        byte[] pdf = File.ReadAllBytes(Fixture("pdf.bin"));
+        byte[] text = File.ReadAllBytes(Fixture("text.bin"));
+        string directory = Path.Combine(Path.GetTempPath(), "magika-parallel-" + Guid.NewGuid().ToString("n"));
+        Directory.CreateDirectory(directory);
+        string pdfPath = Path.Combine(directory, "sample.pdf");
+        string textPath = Path.Combine(directory, "sample.txt");
+        File.WriteAllBytes(pdfPath, pdf);
+        File.WriteAllBytes(textPath, text);
+        try
+        {
+            Parallel.For(0, 4, _ =>
+            {
+                Assert.Equal("pdf", session.IdentifyPath(pdfPath).ContentType.Label);
+                Assert.Equal("txt", session.IdentifyPath(textPath).ContentType.Label);
+                Assert.Equal("pdf", session.Identify(new MemoryStream(pdf)).ContentType.Label);
+                using ChunkedStream forward = new(text, chunk: 3);
+                Assert.Equal("txt", session.Identify(forward).ContentType.Label);
+            });
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Inference_IsCpuFastEnoughForInteractiveUse()
     {
         MagikaSession session = MagikaSession.Create();
@@ -271,6 +345,86 @@ public class MagikaTests
 
         watch.Stop();
         Assert.True(watch.Elapsed.TotalMilliseconds / 5 < 250, $"average inference {watch.Elapsed.TotalMilliseconds / 5:0.0} ms");
+    }
+
+    private static void AssertSame(MagikaResult expected, MagikaResult actual, string scenario)
+    {
+        Assert.True(
+            expected.ContentType.Label == actual.ContentType.Label
+            && expected.ModelContentType?.Label == actual.ModelContentType?.Label
+            && expected.Score == actual.Score
+            && expected.OverwriteReason == actual.OverwriteReason,
+            $"{scenario}: expected {expected.ContentType.Label}/{expected.ModelContentType?.Label} {expected.Score:R} {expected.OverwriteReason}, actual {actual.ContentType.Label}/{actual.ModelContentType?.Label} {actual.Score:R} {actual.OverwriteReason}");
+    }
+
+    private static byte[] Pattern(int size)
+    {
+        byte[] data = new byte[size];
+        for (int i = 0; i < data.Length; i++)
+        {
+            data[i] = (byte)(i * 17 + 3);
+        }
+
+        if (size > 0)
+        {
+            data[0] = (byte)'%';
+            data[^1] = (byte)'Z';
+        }
+
+        return data;
+    }
+
+    private sealed class ChunkedStream : Stream
+    {
+        private readonly byte[] _data;
+        private readonly int _chunk;
+        private int _position;
+
+        public ChunkedStream(byte[] data, int chunk)
+        {
+            _data = data;
+            _chunk = chunk;
+        }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            int remaining = _data.Length - _position;
+            int n = Math.Min(buffer.Length, Math.Min(_chunk, remaining));
+            if (n <= 0)
+            {
+                return 0;
+            }
+
+            _data.AsSpan(_position, n).CopyTo(buffer);
+            _position += n;
+            return n;
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static float[] OneHot(ModelDefinition model, string label, float score)

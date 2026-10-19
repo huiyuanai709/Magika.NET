@@ -1,3 +1,5 @@
+using Microsoft.Win32.SafeHandles;
+
 namespace Magika;
 
 /// <summary>
@@ -42,7 +44,10 @@ public sealed class MagikaSession
     /// <summary>Identifies a buffer.</summary>
     public MagikaResult Identify(ReadOnlySpan<byte> content) => Identify(content, path: null);
 
-    /// <summary>Identifies a seekable stream without reading bytes it does not need. The position is restored.</summary>
+    /// <summary>
+    /// Identifies a stream. A seekable stream is read at the start and end only, and its position is restored.
+    /// A non-seekable stream is consumed to the end; only the first and last block are kept.
+    /// </summary>
     public MagikaResult Identify(Stream stream, string? path = null)
     {
         ArgumentNullException.ThrowIfNull(stream);
@@ -53,9 +58,13 @@ public sealed class MagikaSession
 
         if (!stream.CanSeek)
         {
-            using MemoryStream copy = new();
-            stream.CopyTo(copy);
-            return Identify(copy.GetBuffer().AsSpan(0, (int)copy.Length), path);
+            using ContentEnds.Window ends = ContentEnds.ReadForward(stream, _model.BlockSize, out long length);
+            if (length == 0)
+            {
+                return Heuristic(path, "empty", score: 1f);
+            }
+
+            return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
         }
 
         long position = stream.Position;
@@ -67,31 +76,8 @@ public sealed class MagikaSession
                 return Heuristic(path, "empty", score: 1f);
             }
 
-            int block = (int)Math.Min(_model.BlockSize, length);
-            byte[] prefix = new byte[block];
-            stream.Position = 0;
-            ReadExact(stream, prefix);
-            byte[] suffix;
-            if (length <= block)
-            {
-                suffix = prefix;
-            }
-            else if (length <= block * 2L)
-            {
-                byte[] whole = new byte[length];
-                prefix.AsSpan().CopyTo(whole);
-                ReadExact(stream, whole.AsSpan(block));
-                prefix = whole[..block];
-                suffix = whole[^block..];
-            }
-            else
-            {
-                suffix = new byte[block];
-                stream.Position = length - block;
-                ReadExact(stream, suffix);
-            }
-
-            return IdentifyBlocks(prefix, suffix, length, path);
+            using ContentEnds.Window ends = ContentEnds.ReadSeekable(stream, length, _model.BlockSize);
+            return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
         }
         finally
         {
@@ -129,8 +115,16 @@ public sealed class MagikaSession
             return Heuristic(path, "unsupported", score: 1f);
         }
 
-        using FileStream stream = File.OpenRead(path);
-        return Identify(stream, path);
+        // pread of the head and tail. A mapped view was slower for the 4 KiB block.
+        using SafeFileHandle handle = File.OpenHandle(path);
+        long length = RandomAccess.GetLength(handle);
+        if (length == 0)
+        {
+            return Heuristic(path, "empty", score: 1f);
+        }
+
+        using ContentEnds.Window ends = ContentEnds.ReadHandle(handle, length, _model.BlockSize);
+        return IdentifyBlocks(ends.Prefix, ends.Suffix, length, path);
     }
 
     internal bool EmbeddingFused => _session.EmbeddingFused;
@@ -197,19 +191,4 @@ public sealed class MagikaSession
 
     private static MagikaResult Heuristic(string? path, string label, float score) =>
         new(path, ContentTypes.Get(label), modelContentType: null, score, overwriteReason: null);
-
-    private static void ReadExact(Stream stream, Span<byte> buffer)
-    {
-        int read = 0;
-        while (read < buffer.Length)
-        {
-            int n = stream.Read(buffer[read..]);
-            if (n == 0)
-            {
-                throw new EndOfStreamException("Stream ended before the requested bytes were read.");
-            }
-
-            read += n;
-        }
-    }
 }
