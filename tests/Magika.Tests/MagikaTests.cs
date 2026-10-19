@@ -176,10 +176,9 @@ public class MagikaTests
             string expectedLabel = spec.GetProperty("label").GetString()!;
             float expectedScore = spec.GetProperty("score").GetSingle();
             Assert.Equal(expectedLabel, result.ModelContentType!.Label);
-            // Linux libm matches the ONNX Runtime reference well inside 1e-3.
-            // Windows ucrt tanh/exp shifts a peaked softmax by about 0.01 (pdf: 0.986 vs 0.995)
-            // without changing the argmax. Label checks above stay exact.
-            float tolerance = OperatingSystem.IsWindows() ? 0.02f : 0.001f;
+            // Same byte tolerance on every OS. Fixtures are marked binary so a Windows
+            // checkout cannot turn LF into CRLF and change the bytes the model sees.
+            const float tolerance = 0.001f;
             float scoreDelta = MathF.Abs(expectedScore - result.Score);
             Assert.True(
                 scoreDelta <= tolerance,
