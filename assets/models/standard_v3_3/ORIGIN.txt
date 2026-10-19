@@ -1,0 +1,6 @@
+model: standard_v3_3
+source: https://github.com/google/magika/tree/main/assets/models/standard_v3_3
+license: Apache-2.0
+copyright: Copyright 2024 Google LLC
+files: model.onnx, config.min.json, metadata.json
+notes: Retrieved from the google/magika main branch. These files are Google's model assets and are not relicensed by Magika.NET.

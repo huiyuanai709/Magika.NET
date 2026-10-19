@@ -1,0 +1,3 @@
+# Exact model and fixture bytes. Windows checkout must not rewrite LF as CRLF.
+assets/models/** binary
+tests/Magika.Tests/Fixtures/** binary
