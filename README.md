@@ -79,9 +79,9 @@ dotnet run --project src/Magika.Cli -c Release -- --prediction-mode medium --no-
 dotnet test Magika.slnx -c Release
 ```
 
-测试对照一组小样本（PDF、PNG、ZIP、文本、JavaScript、JSON、HTML、Python、gzip、ELF）的标签，并把概率与 ONNX Runtime 的输出比较（最大绝对误差 < 1e-3）。ONNX Runtime 只用于生成那份对照，不是运行时依赖。
+测试对照一组小样本（PDF、PNG、ZIP、文本、JavaScript、JSON、HTML、Python、gzip、ELF）的标签，并把概率与 ONNX Runtime 的输出比较。标签必须一致。Linux 上概率最大绝对误差不超过 1e-3；Windows 的 tanh/exp 会把尖峰概率挪大约 0.01，允许 0.02。ONNX Runtime 只用于生成那份对照，不是运行时依赖。
 
-GitHub Actions 在 `ubuntu-latest` 和 `windows-latest` 上跑同一条 `dotnet test`。
+GitHub Actions 在 `ubuntu-latest` 和 `windows-latest` 上跑同一条 `dotnet test`。推送 `v*` tag（当前版本是 `v0.1.0`）或手动跑 Release workflow 时，会用 Native AOT 打出 `linux-x64` 和 `win-x64` 的 zip，并附上 `SHA256SUMS.txt`。每个 zip 里有 `RUN.txt`。
 
 ## English
 
@@ -89,4 +89,4 @@ Magika.NET identifies file content types with Google's Magika `standard_v3_3` mo
 
 ONNX runs in-process. The interpreter is original C# in the style of SimdPaddleOCR: handwritten AVX-512 and AVX2/FMA GEMM, no ONNX Runtime and no native inference library. SimdPaddleOCR itself is not referenced; its OCR operator set does not cover this graph. See `THIRD-PARTY-NOTICES.md` for the Google model license and that design credit.
 
-The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the tool command name is `magika`. This build does not ship Magika's YARA rules.
+The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the tool command name is `magika`. This build does not ship Magika's YARA rules. A `v*` tag such as `v0.1.0` publishes Native AOT zips for `linux-x64` and `win-x64`.

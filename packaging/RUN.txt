@@ -1,0 +1,29 @@
+Magika.NET 命令行（Native AOT）
+
+本目录是一次发布包。版本和平台写在 VERSION.txt。
+程序是 Apache-2.0。standard_v3_3 模型已经嵌在二进制里，不需要再下载。
+对应源码是本仓库里同名的 git tag。包里没有 .pdb / .dbg 调试符号。
+
+Linux（在 ubuntu-latest 上构建，需要兼容的 glibc）:
+
+  chmod +x magika
+  ./magika --version
+  ./magika example.pdf
+  ./magika --json example.pdf
+
+Windows:
+
+  magika.exe --version
+  magika.exe example.pdf
+  magika.exe --json example.pdf
+
+文本输出是「路径: 标签 分数 MIME 分组」。
+--prediction-mode 可以是 high、medium 或 best-guess，默认 high。
+--no-dereference 把符号链接标成 symlink，而不是跟随目标。
+退出码：成功 0，找不到文件 1，参数错误 2。
+
+English
+
+This directory is one Native AOT release. The standard_v3_3 model is embedded.
+Run ./magika <file> on Linux or magika.exe <file> on Windows.
+Text output is "path: label score mime group". See --help for the other flags.
