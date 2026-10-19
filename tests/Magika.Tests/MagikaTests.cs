@@ -749,6 +749,75 @@ public class MagikaTests
         }
     }
 
+    [Fact]
+    public void Specialized_PadShortcutMatchesInterpreterAndDenseRowsStayBitIdentical()
+    {
+        MagikaSession session = MagikaSession.Create();
+        int width = session.Model.FeaturesSize;
+        int pad = session.Model.PaddingToken;
+        const float tolerance = 1e-4f;
+
+        int[] sparse = new int[width];
+        Array.Fill(sparse, pad);
+        for (int i = 0; i < 48; i++)
+        {
+            sparse[i] = 65 + (i % 26);
+            sparse[width - 1 - i] = 97 + (i % 26);
+        }
+
+        float[] sparseFast = session.ScorePacked(sparse, 1);
+        float[] sparseSlow = session.ScorePackedReference(sparse, 1);
+        float sparseMax = MaxAbs(sparseSlow, sparseFast);
+        Assert.True(sparseMax <= tolerance, $"pad-window max abs diff {sparseMax:R}");
+
+        int[] dense = new int[width];
+        for (int i = 0; i < width; i++)
+        {
+            dense[i] = i % 251;
+        }
+
+        float[] denseFast = session.ScorePacked(dense, 1);
+        float[] denseSlow = session.ScorePackedReference(dense, 1);
+        float denseMax = MaxAbs(denseSlow, denseFast);
+        Assert.True(denseMax <= tolerance, $"dense max abs diff {denseMax:R}");
+
+        int[] packed = new int[width * 2];
+        dense.CopyTo(packed.AsSpan(0, width));
+        sparse.CopyTo(packed.AsSpan(width, width));
+        float[] both = session.ScorePacked(packed, 2);
+        for (int j = 0; j < denseFast.Length; j++)
+        {
+            Assert.Equal(denseFast[j], both[j]);
+            Assert.Equal(sparseFast[j], both[denseFast.Length + j]);
+        }
+
+        byte[] big = new byte[8192];
+        for (int i = 0; i < big.Length; i++)
+        {
+            big[i] = (byte)(1 + (i % 250));
+        }
+
+        float[] bigFast = session.Score(big);
+        float[] bigSlow = session.ScoreReference(big);
+        float bigMax = MaxAbs(bigSlow, bigFast);
+        Assert.True(bigMax <= tolerance, $"full-window max abs diff {bigMax:R}");
+
+        // Two separated pad runs: content in the middle as well as at both ends.
+        int[] split = new int[width];
+        Array.Fill(split, pad);
+        for (int i = 0; i < 16; i++)
+        {
+            split[i] = 40 + i;
+            split[900 + i] = 80 + i;
+            split[width - 16 + i] = 120 + i;
+        }
+
+        float[] splitFast = session.ScorePacked(split, 1);
+        float[] splitSlow = session.ScorePackedReference(split, 1);
+        float splitMax = MaxAbs(splitSlow, splitFast);
+        Assert.True(splitMax <= tolerance, $"split pad-window max abs diff {splitMax:R}");
+    }
+
     private static float MaxAbs(float[] expected, float[] actual)
     {
         float max = 0f;

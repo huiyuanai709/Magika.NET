@@ -205,7 +205,7 @@ public sealed partial class MagikaSession
 
         lock (_gate)
         {
-            return _session.Run(features, batch: 1, _model.FeaturesSize);
+            return _session.Run(features, batch: 1, _model.FeaturesSize, _model.PaddingToken);
         }
     }
 
@@ -218,7 +218,7 @@ public sealed partial class MagikaSession
 
         lock (_gate)
         {
-            return _session.Run(features, batch, _model.FeaturesSize);
+            return _session.Run(features, batch, _model.FeaturesSize, _model.PaddingToken);
         }
     }
 
@@ -287,7 +287,7 @@ public sealed partial class MagikaSession
         float[] scores;
         lock (_gate)
         {
-            scores = _session.Run(features, batch: 1, features.Length);
+            scores = _session.Run(features, batch: 1, features.Length, _model.PaddingToken);
         }
 
         return DecideScores(scores, path);

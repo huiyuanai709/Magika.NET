@@ -48,12 +48,12 @@ internal sealed class OnnxSession
     /// <summary>Another evaluation state over the same immutable weights.</summary>
     public OnnxSession Fork() => new(_model, _v33);
 
-    public float[] Run(ReadOnlySpan<int> tokens, int batch, int sequence)
+    public float[] Run(ReadOnlySpan<int> tokens, int batch, int sequence, int paddingToken = -1)
     {
         if (_v33State is not null && sequence == StandardV33Model.Sequence)
         {
             OutputWidth = StandardV33Model.Classes;
-            return _v33State.Evaluate(tokens, batch);
+            return _v33State.Evaluate(tokens, batch, paddingToken);
         }
 
         return RunInterpreted(tokens, batch, sequence);
