@@ -311,14 +311,22 @@ public sealed partial class MagikaSession
         return Prepared.ForModel();
     }
 
-    private static int ResolveWorkers(int configured)
+    private static int ResolveWorkers(int configured, bool specialized)
     {
         if (configured > 0)
         {
             return configured;
         }
 
-        // One lane per processor. Several narrow lanes beat one lane that fans the convolution across every core.
+        // The specialized convolution already fans across processors inside one lane.
+        // One lane per core then runs that many full products at once and loses to a single wide product
+        // (measured: 8 lanes at ~43 files/s vs 1 lane at ~75 files/s on an 8-core host).
+        // The interpreter has no such inner parallel product, so it still wants one narrow lane per core.
+        if (specialized)
+        {
+            return 1;
+        }
+
         return Math.Max(1, Environment.ProcessorCount);
     }
 

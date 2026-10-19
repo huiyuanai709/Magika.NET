@@ -674,15 +674,22 @@ public class MagikaTests
     }
 
     [Fact]
-    public void InferenceWorkers_AutoMatchesProcessorCountAndExplicitValuesAreNotCapped()
+    public void InferenceWorkers_AutoUsesOneSpecializedLaneAndExplicitValuesAreNotCapped()
     {
         MethodInfo resolve = typeof(MagikaSession).GetMethod("ResolveWorkers", BindingFlags.Static | BindingFlags.NonPublic)!;
         Assert.NotNull(resolve);
-        Assert.Equal(Math.Max(1, Environment.ProcessorCount), (int)resolve.Invoke(null, [0])!);
-        Assert.Equal(16, (int)resolve.Invoke(null, [16])!);
-        Assert.Equal(32, (int)resolve.Invoke(null, [32])!);
+        Assert.Equal(1, (int)resolve.Invoke(null, [0, true])!);
+        Assert.Equal(Math.Max(1, Environment.ProcessorCount), (int)resolve.Invoke(null, [0, false])!);
+        Assert.Equal(16, (int)resolve.Invoke(null, [16, true])!);
+        Assert.Equal(32, (int)resolve.Invoke(null, [32, true])!);
+        Assert.Equal(32, (int)resolve.Invoke(null, [32, false])!);
+
+        MagikaSession auto = MagikaSession.Create();
+        Assert.True(auto.Specialized);
+        Assert.Equal(1, auto.WorkerCount);
 
         MagikaSession wide = MagikaSession.Create(new MagikaOptions { InferenceWorkers = 32 });
+        Assert.Equal(32, wide.WorkerCount);
         Assert.Equal("pdf", wide.Identify(File.ReadAllBytes(Fixture("pdf.bin"))).ContentType.Label);
         Assert.Throws<ArgumentOutOfRangeException>(() => MagikaSession.Create(new MagikaOptions { InferenceWorkers = -1 }));
     }

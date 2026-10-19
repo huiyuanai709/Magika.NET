@@ -24,11 +24,14 @@ public sealed class MagikaOptions
 
     /// <summary>
     /// How many inference lanes multi-file identification may run at once.
-    /// <c>0</c> (the default) uses one lane per processor.
-    /// Each lane is a managed ONNX session that shares the model weights and keeps its own activation scratch.
-    /// Lanes are created on the first multi-file call. The convolution product's thread count is split across lanes.
+    /// <c>0</c> (the default) picks the count.
+    /// For the bundled specialized model that count is one lane, and the convolution uses every processor.
+    /// Several lanes each running that parallel product oversubscribe the machine and the cache.
+    /// A graph that stays on the interpreter still uses one lane per processor.
+    /// Each lane shares the model weights and keeps its own activation scratch.
+    /// Lanes are created on the first multi-file call. When there is more than one lane, the convolution's thread count is split across them so the product stays near the processor count.
     /// Single-file identification always uses one lane and does not create the pool.
-    /// Negative values are rejected. An explicit count is used as given.
+    /// Negative values are rejected. An explicit count is used as given, with no cap.
     /// </summary>
     public int InferenceWorkers { get; init; }
 }

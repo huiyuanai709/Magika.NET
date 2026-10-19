@@ -24,7 +24,7 @@ Console.WriteLine(result.Score);
 
 `IdentifyAsync` 和 `IdentifyPathAsync` 接受 `CancellationToken`，读取的仍是同一段前缀和后缀。路径使用 `RandomAccess.ReadAsync`。库和 CLI 用 `<Features>$(Features);runtime-async=on</Features>` 编译异步方法。取消只作用于读取；ONNX 推理本身是同步的。
 
-`IdentifyPaths` 和 `IdentifyPathsAsync` 保持输入顺序。它们并发读取多个路径，再按批给特征向量打分（`MagikaOptions.BatchSize`，默认 8），用的是一池托管会话（`InferenceWorkers`）。`IdentifyFeatures` 和 `IdentifyFeaturesBatch` 给已经抽好的向量打分（这个模型每行 2048 个整数）。一个会话可以跨线程共用：单文件调用占用一条推理通道，多文件 API 使用通道池。通道池在第一次多文件调用时创建。各通道共享模型权重，激活暂存各自独立。一条通道同一时间只跑一次前向。`InferenceWorkers` 为 0 时，池大小就是处理器数量，每条通道的卷积分到相等的线程数。显式指定的通道数会按原值使用。
+`IdentifyPaths` 和 `IdentifyPathsAsync` 保持输入顺序。它们并发读取多个路径，再按批给特征向量打分（`MagikaOptions.BatchSize`，默认 8），用的是一池托管会话（`InferenceWorkers`）。`IdentifyFeatures` 和 `IdentifyFeaturesBatch` 给已经抽好的向量打分（这个模型每行 2048 个整数）。一个会话可以跨线程共用：单文件调用占用一条推理通道，多文件 API 使用通道池。通道池在第一次多文件调用时创建。各通道共享模型权重，激活暂存各自独立。一条通道同一时间只跑一次前向。`InferenceWorkers` 为 0 时，专用模型只用一条通道，卷积占用全部处理器。专用卷积本身已经并行，再按核数开通道会抢核、抢缓存。仍走解释器的图则还是每个处理器一条通道。显式指定的通道数按原值使用，不设上限；多出来的通道会把卷积线程拆开，使通道数乘每通道线程数接近处理器数量。
 
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
@@ -52,7 +52,7 @@ dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode mediu
 dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./files/*
 ```
 
-文本输出是 `路径: 标签 分数 MIME 分组`，顺序与参数一致。单个路径走 `IdentifyPathAsync`。多个路径并发读取，再用 `IdentifyPathsAsync` 打分。`--batch-size`（默认 8，范围 1..64）是一次前向里的特征行数。`--workers`（默认 0）是推理池：每个处理器一条通道。显式给出的数量会按原值使用。每条通道是同一份权重上的托管会话。增加通道会把卷积的线程预算拆开。推理仍然是托管解释器。
+文本输出是 `路径: 标签 分数 MIME 分组`，顺序与参数一致。单个路径走 `IdentifyPathAsync`。多个路径并发读取，再用 `IdentifyPathsAsync` 打分。`--batch-size`（默认 8，范围 1..64）是一次前向里的特征行数。`--workers`（默认 0）是推理池。自动模式对这个专用模型只用一条通道，卷积可以使用全部处理器；解释器图则每个处理器一条通道。显式给出的数量会按原值使用，不设上限。每条通道是同一份权重上的托管会话。增加通道会把卷积的线程预算拆开。推理仍然是托管解释器。
 
 `--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
 
