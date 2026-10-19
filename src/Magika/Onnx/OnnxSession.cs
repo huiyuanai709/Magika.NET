@@ -89,7 +89,7 @@ internal sealed class OnnxSession
             case "Max":
                 return OnnxOps.Binary(Input(0), Input(1), FloatOp.Max);
             case "Tanh":
-                return OnnxOps.UnaryFloat(Input(0), MathF.Tanh);
+                return OnnxOps.Tanh(Input(0));
             case "Sqrt":
                 return OnnxOps.UnaryFloat(Input(0), MathF.Sqrt);
             case "Reciprocal":

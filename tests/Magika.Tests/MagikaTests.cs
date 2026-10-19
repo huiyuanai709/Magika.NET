@@ -157,6 +157,76 @@ public class MagikaTests
         }
     }
 
+    [Theory]
+    [InlineData(64, 128, 64)]
+    [InlineData(70, 100, 50)]
+    [InlineData(512, 40, 36)]
+    public void Gemm_BlockedMatchesNaive(int m, int k, int n)
+    {
+        float[] a = new float[m * k];
+        float[] b = new float[k * n];
+        float[] expected = new float[m * n];
+        float[] actual = new float[m * n];
+        var random = new Random(99);
+        for (int i = 0; i < a.Length; i++)
+        {
+            a[i] = (float)(random.NextDouble() * 2 - 1);
+        }
+
+        for (int i = 0; i < b.Length; i++)
+        {
+            b[i] = (float)(random.NextDouble() * 2 - 1);
+        }
+
+        for (int i = 0; i < m; i++)
+        {
+            for (int j = 0; j < n; j++)
+            {
+                double sum = 0;
+                for (int p = 0; p < k; p++)
+                {
+                    sum += a[(i * k) + p] * b[(p * n) + j];
+                }
+
+                expected[(i * n) + j] = (float)sum;
+            }
+        }
+
+        Onnx.SimdGemm.Multiply(a, b, actual, m, k, n);
+        for (int i = 0; i < expected.Length; i++)
+        {
+            float delta = MathF.Abs(expected[i] - actual[i]);
+            Assert.True(delta <= 2e-3f, $"index {i} expected {expected[i]} actual {actual[i]} delta {delta}");
+        }
+    }
+
+    [Fact]
+    public void Tanh_MatchesMathF()
+    {
+        float[] source = new float[4096 + 7];
+        float[] actual = new float[source.Length];
+        var random = new Random(7);
+        for (int i = 0; i < source.Length; i++)
+        {
+            source[i] = (float)((random.NextDouble() * 24) - 12);
+        }
+
+        source[0] = 0f;
+        source[1] = -0f;
+        source[2] = 9f;
+        source[3] = -9f;
+        source[4] = 20f;
+        source[5] = -20f;
+        source[6] = 0.001f;
+        Onnx.SimdMath.Tanh(source, actual);
+        for (int i = 0; i < source.Length; i++)
+        {
+            float expected = MathF.Tanh(source[i]);
+            float delta = MathF.Abs(expected - actual[i]);
+            Assert.True(delta <= 2e-5f, $"index {i} x {source[i]} expected {expected} actual {actual[i]} delta {delta}");
+        }
+    }
+
     [Fact]
     public void Model_IsFusedAndMatchesOnnxRuntime()
     {
