@@ -26,6 +26,9 @@ internal sealed class StandardV33Model
     internal const int Classes = 214;
     internal const int Mr = 8;
     internal const int SampleStride = 512;
+    internal const int PadToken = 256;
+    internal const int TokensPerGroup = Channels / EmbedDim;
+    internal const int MinPureWindows = 64;
 
     private const string EmbedName = "jax2tf_get_logits_/Const:0";
     private const string EmbedBiasName = "jax2tf_get_logits_/pjit_get_logits_/MagikaV2/Dense_0/Reshape:0";
@@ -57,6 +60,9 @@ internal sealed class StandardV33Model
         float[] denseBias,
         float[] packedA,
         int nr,
+        float[] padAct,
+        float[] padWeight,
+        float[] weightSum,
         float geluCubic,
         float geluScale,
         float geluHalf,
@@ -76,6 +82,9 @@ internal sealed class StandardV33Model
         DenseBias = denseBias;
         PackedA = packedA;
         Nr = nr;
+        PadAct = padAct;
+        PadWeight = padWeight;
+        WeightSum = weightSum;
         GeluCubic = geluCubic;
         GeluScale = geluScale;
         GeluHalf = geluHalf;
@@ -97,6 +106,15 @@ internal sealed class StandardV33Model
 
     /// <summary>Conv filters packed for the 8-row microkernel: each K step holds 8 contiguous weights.</summary>
     internal float[] PackedA { get; }
+
+    /// <summary>GELU(embed(pad) + bias), repeated across the four tokens of a pure padding group.</summary>
+    internal float[] PadAct { get; }
+
+    /// <summary>Conv weights as [channel, tap, filter] so a padding response is a short axpy.</summary>
+    internal float[] PadWeight { get; }
+
+    /// <summary>Sum of conv weights over channels, laid out [tap, filter].</summary>
+    internal float[] WeightSum { get; }
 
     internal int Nr { get; }
     internal int TilesPerSample => SampleStride / Nr;
@@ -150,6 +168,7 @@ internal sealed class StandardV33Model
 
         int nr = Avx512F.IsSupported ? 32 : Avx2.IsSupported && Fma.IsSupported ? 16 : 0;
         float[] packedA = nr == 0 ? [] : PackA(convWeight);
+        PackPadTables(convWeight, embed, embedBias, geluCubic, geluScale, geluOne, geluHalf, out float[] padAct, out float[] padWeight, out float[] weightSum);
         return new StandardV33Model(
             embed,
             embedBias,
@@ -163,6 +182,9 @@ internal sealed class StandardV33Model
             denseBias,
             packedA,
             nr == 0 ? 1 : nr,
+            padAct,
+            padWeight,
+            weightSum,
             geluCubic,
             geluScale,
             geluHalf,
@@ -273,6 +295,48 @@ internal sealed class StandardV33Model
 
         return packed;
     }
+
+    private static void PackPadTables(
+        float[] weight,
+        float[] embed,
+        float[] embedBias,
+        float cubic,
+        float scale,
+        float one,
+        float half,
+        out float[] padAct,
+        out float[] padWeight,
+        out float[] weightSum)
+    {
+        float[] row = new float[EmbedDim];
+        int pad = PadToken * EmbedDim;
+        for (int d = 0; d < EmbedDim; d++)
+        {
+            row[d] = embed[pad + d] + embedBias[d];
+        }
+
+        SimdMath.Gelu(row, cubic, scale, one, half);
+        padAct = new float[Channels];
+        for (int c = 0; c < Channels; c++)
+        {
+            padAct[c] = row[c % EmbedDim];
+        }
+
+        padWeight = new float[Channels * Kernel * Filters];
+        weightSum = new float[Kernel * Filters];
+        for (int f = 0; f < Filters; f++)
+        {
+            for (int ic = 0; ic < Channels; ic++)
+            {
+                for (int kh = 0; kh < Kernel; kh++)
+                {
+                    float value = weight[(((f * Channels) + ic) * Kernel) + kh];
+                    padWeight[(((ic * Kernel) + kh) * Filters) + f] = value;
+                    weightSum[(kh * Filters) + f] += value;
+                }
+            }
+        }
+    }
 }
 
 /// <summary>
@@ -295,6 +359,20 @@ internal sealed class StandardV33Session
     private float[] _norm = new float[StandardV33Model.Filters];
     private float[] _logits = new float[StandardV33Model.Classes];
     private float[] _tiles = [];
+    private readonly float[] _mean = new float[StandardV33Model.Channels];
+    private readonly float[] _invStd = new float[StandardV33Model.Channels];
+    private readonly float[] _padT = new float[StandardV33Model.Kernel * StandardV33Model.Filters];
+    private readonly float[] _padAcc = new float[StandardV33Model.Filters];
+    private readonly int[] _activeOh = new int[StandardV33Model.OutH];
+    private byte[] _shortcut = [];
+    private float[] _savedMean = [];
+    private float[] _savedInv = [];
+    private float[] _analytic = [];
+    private int _geomTiles;
+    private int _geomPad;
+    private int _geomColumns;
+    private int _geomSample;
+    private bool _geomBatch;
 
     internal static void CheckKernels()
     {
@@ -371,7 +449,7 @@ internal sealed class StandardV33Session
         Ensure(1);
     }
 
-    internal float[] Evaluate(ReadOnlySpan<int> tokens, int batch)
+    internal float[] Evaluate(ReadOnlySpan<int> tokens, int batch, int paddingToken = -1)
     {
         if (batch <= 0 || tokens.Length != batch * StandardV33Model.Sequence)
         {
@@ -381,28 +459,36 @@ internal sealed class StandardV33Session
         Ensure(batch);
         tokens.CopyTo(_tokens);
         _batch = batch;
+        bool shortcut = false;
         for (int sample = 0; sample < batch; sample++)
         {
             EmbedAndNormalize(sample);
+            bool sparse = IsPadShortcut(sample, paddingToken);
+            _shortcut[sample] = sparse ? (byte)1 : (byte)0;
+            if (sparse)
+            {
+                shortcut = true;
+                _mean.AsSpan().CopyTo(_savedMean.AsSpan(sample * StandardV33Model.Channels, StandardV33Model.Channels));
+                _invStd.AsSpan().CopyTo(_savedInv.AsSpan(sample * StandardV33Model.Channels, StandardV33Model.Channels));
+            }
         }
 
-        if (_model.Portable)
+        if (!shortcut)
         {
-            ConvolvePortable();
-        }
-        else
-        {
-            PackB();
-            int threads = ChooseThreads(StandardV33Model.Filters / StandardV33Model.Mr);
-            _threads = threads;
-            if (threads == 1)
+            if (_model.Portable)
             {
-                ConvolveWorker(0);
+                ConvolvePortable();
             }
             else
             {
-                Parallel.For(0, threads, _convolve);
+                PackB();
+                BeginFullGeometry();
+                RunGeometry();
             }
+        }
+        else
+        {
+            ConvolveShortcutBatch();
         }
 
         // GELU is monotonic, so max(gelu(conv + bias)) == gelu(max(conv) + bias).
@@ -430,6 +516,10 @@ internal sealed class StandardV33Session
         _act = GC.AllocateUninitializedArray<float>(act);
         _conv = GC.AllocateUninitializedArray<float>(act);
         _pooled = GC.AllocateUninitializedArray<float>(batch * StandardV33Model.Filters);
+        _shortcut = new byte[batch];
+        _savedMean = new float[batch * StandardV33Model.Channels];
+        _savedInv = new float[batch * StandardV33Model.Channels];
+        _analytic = new float[batch * StandardV33Model.Filters];
         if (!_model.Portable)
         {
             int tiles = batch * _model.TilesPerSample;
@@ -515,18 +605,22 @@ internal sealed class StandardV33Session
         fixed (float* convBase = _conv)
         fixed (float* gamma = _model.Ln0Gamma)
         fixed (float* beta = _model.Ln0Beta)
+        fixed (float* mean = _mean)
+        fixed (float* invStd = _invStd)
         {
             LayerNorm0Core(
                 actBase + (sample * groups * channels),
                 convBase + (sample * groups * channels),
                 gamma,
                 beta,
+                mean,
+                invStd,
                 _model.InvLength,
                 _model.Epsilon);
         }
     }
 
-    private static unsafe void LayerNorm0Core(float* act, float* conv, float* gamma, float* beta, float invN, float eps)
+    private static unsafe void LayerNorm0Core(float* act, float* conv, float* gamma, float* beta, float* meanOut, float* invStdOut, float invN, float eps)
     {
         int groups = StandardV33Model.Groups;
         int channels = StandardV33Model.Channels;
@@ -547,6 +641,8 @@ internal sealed class StandardV33Session
                 Vector512<float> variance = Avx512F.Subtract(Avx512F.Multiply(sumSq, Vector512.Create(invN)), Avx512F.Multiply(mean, mean));
                 variance = Avx512F.Max(variance, Vector512<float>.Zero);
                 Vector512<float> invStd = Avx512F.Divide(Vector512<float>.One, Avx512F.Sqrt(Avx512F.Add(variance, Vector512.Create(eps))));
+                Avx512F.Store(meanOut + c, mean);
+                Avx512F.Store(invStdOut + c, invStd);
                 for (int g = 0; g < groups; g++)
                 {
                     Vector512<float> value = Avx512F.LoadVector512(act + (g * channels) + c);
@@ -574,6 +670,8 @@ internal sealed class StandardV33Session
                 Vector256<float> variance = Avx.Subtract(Avx.Multiply(sumSq, Vector256.Create(invN)), Avx.Multiply(mean, mean));
                 variance = Avx.Max(variance, Vector256<float>.Zero);
                 Vector256<float> invStd = Avx.Divide(Vector256<float>.One, Avx.Sqrt(Avx.Add(variance, Vector256.Create(eps))));
+                Avx.Store(meanOut + c, mean);
+                Avx.Store(invStdOut + c, invStd);
                 for (int g = 0; g < groups; g++)
                 {
                     Vector256<float> value = Avx.LoadVector256(act + (g * channels) + c);
@@ -600,6 +698,8 @@ internal sealed class StandardV33Session
                 float mean = sum * invN;
                 float variance = MathF.Max((sumSq * invN) - (mean * mean), 0f);
                 float invStd = 1f / MathF.Sqrt(variance + eps);
+                meanOut[c] = mean;
+                invStdOut[c] = invStd;
                 for (int g = 0; g < groups; g++)
                 {
                     float scale = invStd * gamma[g];
@@ -658,6 +758,472 @@ internal sealed class StandardV33Session
         }
     }
 
+    private void BeginFullGeometry()
+    {
+        _geomBatch = true;
+        _geomTiles = _batch * _model.TilesPerSample;
+        _geomPad = _batch * StandardV33Model.SampleStride;
+        _geomColumns = StandardV33Model.OutH;
+        _geomSample = 0;
+    }
+
+    private void RunGeometry()
+    {
+        int threads = ChooseThreads(StandardV33Model.Filters / StandardV33Model.Mr);
+        if (_geomTiles < 4)
+        {
+            threads = 1;
+        }
+
+        _threads = threads;
+        if (threads == 1)
+        {
+            ConvolveWorker(0);
+        }
+        else
+        {
+            Parallel.For(0, threads, _convolve);
+        }
+    }
+
+    /// <summary>
+    /// Padding groups are four copies of one embedding. After layer norm their convolution
+    /// factors into a per-channel scale, so a pure 5-tap window is five multiply-adds per filter
+    /// instead of the full 1280-wide product. Content windows still use the GEMM.
+    /// </summary>
+    private void ConvolveShortcutBatch()
+    {
+        Span<int> rangeStart = stackalloc int[StandardV33Model.OutH];
+        Span<int> rangeEnd = stackalloc int[StandardV33Model.OutH];
+        for (int sample = 0; sample < _batch; sample++)
+        {
+            if (_shortcut[sample] == 0)
+            {
+                if (_model.Portable)
+                {
+                    ConvolvePortableSample(sample, ReadOnlySpan<int>.Empty, activeCount: -1);
+                }
+                else
+                {
+                    PackSample(sample);
+                    _geomBatch = false;
+                    _geomSample = sample;
+                    _geomTiles = _model.TilesPerSample;
+                    _geomPad = StandardV33Model.SampleStride;
+                    _geomColumns = StandardV33Model.OutH;
+                    RunGeometry();
+                }
+
+                continue;
+            }
+
+            CollectPadWindows(sample, _activeOh, out int activeCount, rangeStart, rangeEnd, out int rangeCount);
+            FillAnalytic(sample, rangeStart, rangeEnd, rangeCount);
+            if (activeCount == 0)
+            {
+                _analytic.AsSpan(sample * StandardV33Model.Filters, StandardV33Model.Filters)
+                    .CopyTo(_pooled.AsSpan(sample * StandardV33Model.Filters, StandardV33Model.Filters));
+                continue;
+            }
+
+            if (_model.Portable)
+            {
+                ConvolvePortableSample(sample, _activeOh, activeCount);
+            }
+            else
+            {
+                int nr = _model.Nr;
+                int nTiles = (activeCount + nr - 1) / nr;
+                PackActive(sample, _activeOh, activeCount, nTiles);
+                _geomBatch = false;
+                _geomSample = sample;
+                _geomTiles = nTiles;
+                _geomPad = nTiles * nr;
+                _geomColumns = activeCount;
+                RunGeometry();
+            }
+
+            CombineAnalytic(sample);
+        }
+    }
+
+    private bool IsPadShortcut(int sample, int paddingToken)
+    {
+        if (paddingToken != StandardV33Model.PadToken)
+        {
+            return false;
+        }
+
+        // A pure window is five fully padded groups. Fewer pad tokens than that run cannot qualify.
+        int need = (StandardV33Model.MinPureWindows + StandardV33Model.Kernel - 1) * StandardV33Model.TokensPerGroup;
+        int pads = 0;
+        int origin = sample * StandardV33Model.Sequence;
+        for (int i = 0; i < StandardV33Model.Sequence; i++)
+        {
+            if (_tokens[origin + i] == paddingToken)
+            {
+                pads++;
+            }
+        }
+
+        if (pads < need)
+        {
+            return false;
+        }
+
+        return CountPureWindows(sample, paddingToken) >= StandardV33Model.MinPureWindows;
+    }
+
+    private int CountPureWindows(int sample, int paddingToken)
+    {
+        Span<int> active = stackalloc int[StandardV33Model.OutH];
+        Span<int> rangeStart = stackalloc int[StandardV33Model.OutH];
+        Span<int> rangeEnd = stackalloc int[StandardV33Model.OutH];
+        CollectPadWindows(sample, active, out _, rangeStart, rangeEnd, out _, paddingToken, out int pure);
+        return pure;
+    }
+
+    private void CollectPadWindows(int sample, Span<int> active, out int activeCount, Span<int> rangeStart, Span<int> rangeEnd, out int rangeCount) =>
+        CollectPadWindows(sample, active, out activeCount, rangeStart, rangeEnd, out rangeCount, StandardV33Model.PadToken, out _);
+
+    private void CollectPadWindows(
+        int sample,
+        Span<int> active,
+        out int activeCount,
+        Span<int> rangeStart,
+        Span<int> rangeEnd,
+        out int rangeCount,
+        int paddingToken,
+        out int pureWindows)
+    {
+        activeCount = 0;
+        rangeCount = 0;
+        pureWindows = 0;
+        int groups = StandardV33Model.Groups;
+        int kernel = StandardV33Model.Kernel;
+        Span<byte> pure = stackalloc byte[groups];
+        int origin = sample * StandardV33Model.Sequence;
+        int step = StandardV33Model.TokensPerGroup;
+        for (int g = 0; g < groups; g++)
+        {
+            int t = origin + (g * step);
+            pure[g] = _tokens[t] == paddingToken
+                && _tokens[t + 1] == paddingToken
+                && _tokens[t + 2] == paddingToken
+                && _tokens[t + 3] == paddingToken
+                ? (byte)1
+                : (byte)0;
+        }
+
+        int run = 0;
+        for (int g = 0; g < kernel; g++)
+        {
+            run += pure[g];
+        }
+
+        int open = -1;
+        for (int oh = 0; oh < StandardV33Model.OutH; oh++)
+        {
+            if (run == kernel)
+            {
+                pureWindows++;
+                if (open < 0)
+                {
+                    open = oh;
+                }
+            }
+            else
+            {
+                if (open >= 0)
+                {
+                    rangeStart[rangeCount] = open;
+                    rangeEnd[rangeCount] = oh;
+                    rangeCount++;
+                    open = -1;
+                }
+
+                active[activeCount++] = oh;
+            }
+
+            if (oh + kernel < groups)
+            {
+                run += pure[oh + kernel] - pure[oh];
+            }
+        }
+
+        if (open >= 0)
+        {
+            rangeStart[rangeCount] = open;
+            rangeEnd[rangeCount] = StandardV33Model.OutH;
+            rangeCount++;
+        }
+    }
+
+    private unsafe void FillAnalytic(int sample, ReadOnlySpan<int> rangeStart, ReadOnlySpan<int> rangeEnd, int rangeCount)
+    {
+        BuildPadResponse(
+            _savedMean.AsSpan(sample * StandardV33Model.Channels, StandardV33Model.Channels),
+            _savedInv.AsSpan(sample * StandardV33Model.Channels, StandardV33Model.Channels));
+        int filters = StandardV33Model.Filters;
+        Span<float> max = _analytic.AsSpan(sample * filters, filters);
+        max.Fill(float.NegativeInfinity);
+        fixed (float* t0 = _padT)
+        fixed (float* u0 = _model.WeightSum)
+        fixed (float* gamma = _model.Ln0Gamma)
+        fixed (float* beta = _model.Ln0Beta)
+        fixed (float* acc = _padAcc)
+        fixed (float* mx = max)
+        {
+            for (int r = 0; r < rangeCount; r++)
+            {
+                for (int oh = rangeStart[r]; oh < rangeEnd[r]; oh++)
+                {
+                    // out[f] = Σ_kh gamma[oh+kh] * T[kh,f] + beta[oh+kh] * U[kh,f]
+                    // T and U already summed the 256 channels, so a padding window is five taps.
+                    SetFma(acc, t0, gamma[oh], u0, beta[oh], filters);
+                    for (int kh = 1; kh < StandardV33Model.Kernel; kh++)
+                    {
+                        int g = oh + kh;
+                        Axpy(acc, t0 + (kh * filters), gamma[g], filters);
+                        Axpy(acc, u0 + (kh * filters), beta[g], filters);
+                    }
+
+                    int f = 0;
+                    if (Avx512F.IsSupported)
+                    {
+                        for (; f + 16 <= filters; f += 16)
+                        {
+                            Vector512<float> value = Avx512F.Max(Avx512F.LoadVector512(mx + f), Avx512F.LoadVector512(acc + f));
+                            Avx512F.Store(mx + f, value);
+                        }
+                    }
+                    else if (Avx2.IsSupported)
+                    {
+                        for (; f + 8 <= filters; f += 8)
+                        {
+                            Vector256<float> value = Avx.Max(Avx.LoadVector256(mx + f), Avx.LoadVector256(acc + f));
+                            Avx.Store(mx + f, value);
+                        }
+                    }
+
+                    for (; f < filters; f++)
+                    {
+                        mx[f] = MathF.Max(mx[f], acc[f]);
+                    }
+                }
+            }
+        }
+    }
+
+    private unsafe void BuildPadResponse(ReadOnlySpan<float> mean, ReadOnlySpan<float> invStd)
+    {
+        int filters = StandardV33Model.Filters;
+        int kernel = StandardV33Model.Kernel;
+        _padT.AsSpan().Clear();
+        fixed (float* t0 = _padT)
+        fixed (float* w0 = _model.PadWeight)
+        fixed (float* s0 = _model.PadAct)
+        fixed (float* meanPtr = mean)
+        fixed (float* invPtr = invStd)
+        {
+            for (int ic = 0; ic < StandardV33Model.Channels; ic++)
+            {
+                float alpha = (s0[ic] - meanPtr[ic]) * invPtr[ic];
+                for (int kh = 0; kh < kernel; kh++)
+                {
+                    Axpy(t0 + (kh * filters), w0 + (((ic * kernel) + kh) * filters), alpha, filters);
+                }
+            }
+        }
+    }
+
+    private static unsafe void SetFma(float* dst, float* a, float aScale, float* b, float bScale, int length)
+    {
+        int i = 0;
+        if (Avx512F.IsSupported)
+        {
+            Vector512<float> aFactor = Vector512.Create(aScale);
+            Vector512<float> bFactor = Vector512.Create(bScale);
+            for (; i + 16 <= length; i += 16)
+            {
+                Vector512<float> product = Avx512F.Multiply(aFactor, Avx512F.LoadVector512(a + i));
+                Vector512<float> value = Avx512F.FusedMultiplyAdd(bFactor, Avx512F.LoadVector512(b + i), product);
+                Avx512F.Store(dst + i, value);
+            }
+        }
+        else if (Avx2.IsSupported && Fma.IsSupported)
+        {
+            Vector256<float> aFactor = Vector256.Create(aScale);
+            Vector256<float> bFactor = Vector256.Create(bScale);
+            for (; i + 8 <= length; i += 8)
+            {
+                Vector256<float> product = Avx.Multiply(aFactor, Avx.LoadVector256(a + i));
+                Vector256<float> value = Fma.MultiplyAdd(bFactor, Avx.LoadVector256(b + i), product);
+                Avx.Store(dst + i, value);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            dst[i] = (aScale * a[i]) + (bScale * b[i]);
+        }
+    }
+
+    private static unsafe void Axpy(float* dst, float* src, float scale, int length)
+    {
+        if (scale == 0f)
+        {
+            return;
+        }
+
+        int i = 0;
+        if (Avx512F.IsSupported)
+        {
+            Vector512<float> factor = Vector512.Create(scale);
+            for (; i + 16 <= length; i += 16)
+            {
+                Vector512<float> value = Avx512F.FusedMultiplyAdd(factor, Avx512F.LoadVector512(src + i), Avx512F.LoadVector512(dst + i));
+                Avx512F.Store(dst + i, value);
+            }
+        }
+        else if (Avx2.IsSupported && Fma.IsSupported)
+        {
+            Vector256<float> factor = Vector256.Create(scale);
+            for (; i + 8 <= length; i += 8)
+            {
+                Vector256<float> value = Fma.MultiplyAdd(factor, Avx.LoadVector256(src + i), Avx.LoadVector256(dst + i));
+                Avx.Store(dst + i, value);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            dst[i] += scale * src[i];
+        }
+    }
+
+    private void CombineAnalytic(int sample)
+    {
+        int filters = StandardV33Model.Filters;
+        int offset = sample * filters;
+        for (int f = 0; f < filters; f++)
+        {
+            _pooled[offset + f] = MathF.Max(_pooled[offset + f], _analytic[offset + f]);
+        }
+    }
+
+    private unsafe void PackSample(int sample)
+    {
+        int nr = _model.Nr;
+        int tilesPer = _model.TilesPerSample;
+        int depth = StandardV33Model.Depth;
+        int channels = StandardV33Model.Channels;
+        int kernel = StandardV33Model.Kernel;
+        int groups = StandardV33Model.Groups;
+        fixed (float* src0 = _conv)
+        fixed (float* dst0 = _packedB)
+        {
+            for (int tile = 0; tile < tilesPer; tile++)
+            {
+                int oh0 = tile * nr;
+                int valid = Math.Min(nr, StandardV33Model.OutH - oh0);
+                float* dstTile = dst0 + (tile * depth * nr);
+                for (int ic = 0; ic < channels; ic++)
+                {
+                    float* src = src0 + (((sample * channels) + ic) * groups) + oh0;
+                    for (int kh = 0; kh < kernel; kh++)
+                    {
+                        float* dst = dstTile + (((ic * kernel) + kh) * nr);
+                        if (valid > 0)
+                        {
+                            Unsafe.CopyBlockUnaligned(dst, src + kh, (uint)(valid * sizeof(float)));
+                        }
+
+                        for (int j = valid; j < nr; j++)
+                        {
+                            dst[j] = 0f;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private unsafe void PackActive(int sample, int[] active, int activeCount, int nTiles)
+    {
+        int nr = _model.Nr;
+        int depth = StandardV33Model.Depth;
+        int channels = StandardV33Model.Channels;
+        int kernel = StandardV33Model.Kernel;
+        int groups = StandardV33Model.Groups;
+        int packed = nTiles * depth * nr;
+        _packedB.AsSpan(0, packed).Clear();
+        fixed (float* src0 = _conv)
+        fixed (float* dst0 = _packedB)
+        {
+            for (int j = 0; j < activeCount; j++)
+            {
+                int tile = j / nr;
+                int lane = j - (tile * nr);
+                int oh = active[j];
+                for (int ic = 0; ic < channels; ic++)
+                {
+                    float* src = src0 + (((sample * channels) + ic) * groups) + oh;
+                    for (int kh = 0; kh < kernel; kh++)
+                    {
+                        dst0[(((tile * depth) + (ic * kernel) + kh) * nr) + lane] = src[kh];
+                    }
+                }
+            }
+        }
+    }
+
+    private unsafe void ConvolvePortableSample(int sample, ReadOnlySpan<int> active, int activeCount)
+    {
+        bool full = activeCount < 0;
+        int n = full ? StandardV33Model.OutH : activeCount;
+        int depth = StandardV33Model.Depth;
+        int channels = StandardV33Model.Channels;
+        int kernel = StandardV33Model.Kernel;
+        int groups = StandardV33Model.Groups;
+        fixed (float* src0 = _conv)
+        fixed (float* col0 = _packedB)
+        {
+            for (int ic = 0; ic < channels; ic++)
+            {
+                float* src = src0 + (((sample * channels) + ic) * groups);
+                for (int kh = 0; kh < kernel; kh++)
+                {
+                    float* dst = col0 + (((ic * kernel) + kh) * n);
+                    if (full)
+                    {
+                        Unsafe.CopyBlockUnaligned(dst, src + kh, (uint)(n * sizeof(float)));
+                    }
+                    else
+                    {
+                        for (int j = 0; j < n; j++)
+                        {
+                            dst[j] = src[active[j] + kh];
+                        }
+                    }
+                }
+            }
+        }
+
+        SimdGemm.Multiply(_model.ConvWeight, _packedB, _tiles, StandardV33Model.Filters, depth, n);
+        for (int filter = 0; filter < StandardV33Model.Filters; filter++)
+        {
+            float max = float.NegativeInfinity;
+            int row = filter * n;
+            for (int j = 0; j < n; j++)
+            {
+                max = MathF.Max(max, _tiles[row + j]);
+            }
+
+            _pooled[(sample * StandardV33Model.Filters) + filter] = max;
+        }
+    }
+
     private void ConvolveWorker(int id)
     {
         int tiles = StandardV33Model.Filters / StandardV33Model.Mr;
@@ -681,8 +1247,8 @@ internal sealed class StandardV33Session
         int nr = _model.Nr;
         int depth = StandardV33Model.Depth;
         int mr = StandardV33Model.Mr;
-        int nPad = _batch * StandardV33Model.SampleStride;
-        int nTiles = _batch * _model.TilesPerSample;
+        int nPad = _geomPad;
+        int nTiles = _geomTiles;
         fixed (float* a0 = _model.PackedA)
         fixed (float* b0 = _packedB)
         fixed (float* c0 = _convOut)
@@ -717,9 +1283,16 @@ internal sealed class StandardV33Session
                 {
                     int filter = (filterTile * mr) + row;
                     float* src = c0 + (filter * nPad);
-                    for (int sample = 0; sample < _batch; sample++)
+                    if (_geomBatch)
                     {
-                        pooled[(sample * StandardV33Model.Filters) + filter] = MaxPrefix(src + (sample * StandardV33Model.SampleStride), StandardV33Model.OutH);
+                        for (int sample = 0; sample < _batch; sample++)
+                        {
+                            pooled[(sample * StandardV33Model.Filters) + filter] = MaxPrefix(src + (sample * StandardV33Model.SampleStride), StandardV33Model.OutH);
+                        }
+                    }
+                    else
+                    {
+                        pooled[(_geomSample * StandardV33Model.Filters) + filter] = MaxPrefix(src, _geomColumns);
                     }
                 }
             }

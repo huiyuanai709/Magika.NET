@@ -233,7 +233,7 @@ public sealed partial class MagikaSession
                     Onnx.SimdGemm.ThreadBudget = _gemmThreadsPerLane;
                 }
 
-                return lane.Session.Run(tokens, batch, sequence);
+                return lane.Session.Run(tokens, batch, sequence, _model.PaddingToken);
             }
             finally
             {
