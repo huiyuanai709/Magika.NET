@@ -65,7 +65,7 @@ dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode mediu
 
 ## 发布
 
-项目版本 `0.1.1`。推送 `v0.1.1` 这样的 `v*` tag，或用该版本手动跑 Release workflow，会发布 Native AOT zip 和 `SHA256SUMS.txt`：
+项目版本 `0.1.2`。推送 `v0.1.2` 这样的 `v*` tag，或用该版本手动跑 Release workflow，会发布 Native AOT zip 和 `SHA256SUMS.txt`：
 
 | 文件 | 构建环境 |
 | --- | --- |
