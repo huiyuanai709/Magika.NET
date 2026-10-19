@@ -22,6 +22,8 @@ Console.WriteLine(result.Score);
 
 `Identify` accepts bytes. `Identify(Stream)` restores the stream position and, when the stream can seek, reads only a block from each end. `IdentifyPath` reports a directory as `directory`. Symlinks are followed unless `FollowSymlinks` is false, which reports `symlink`.
 
+`IdentifyAsync` and `IdentifyPathAsync` take a `CancellationToken` and read those same prefix and suffix windows. Paths use `RandomAccess.ReadAsync`. The library and CLI compile async methods with runtime async (`<Features>$(Features);runtime-async=on</Features>`). Cancellation stops the read; the ONNX run itself is synchronous.
+
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
 {
