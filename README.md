@@ -57,7 +57,7 @@ dotnet run --project src/Magika.Cli -c Release -- --prediction-mode medium --no-
 
 ## ONNX 如何执行
 
-图由本仓库里的托管解释器执行（`src/Magika/Onnx`）。做法对齐 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR)：纯 C# 逐算子解释，GEMM / 卷积用自己写的 AVX-512、AVX2/FMA 内核，其它 CPU 走 `System.Numerics.Vector<float>`。没有 ONNX Runtime、Paddle Inference，也没有其它本机推理库。
+图由本仓库里的托管解释器执行（`src/Magika/Onnx`）。做法对齐 [SimdPaddleOCR](https://github.com/sdcb/SimdPaddleOCR)：纯 C# 逐算子解释，GEMM / 卷积用自己写的 AVX-512、AVX2/FMA 内核，其它 CPU（包括 Apple Silicon）走 `System.Numerics.Vector<float>`。没有 ONNX Runtime、Paddle Inference，也没有其它本机推理库。
 
 没有把 SimdPaddleOCR 当成包或子模块引用。它的解释器面向 OCR 图，缺少本模型要用的 `Equal`、`Cast`、`Shape`、`Expand`、`Reciprocal`、`GlobalMaxPool`。这里只实现了 `standard_v3_3` 图里出现的算子。
 
@@ -81,12 +81,12 @@ dotnet test Magika.slnx -c Release
 
 测试对照一组小样本（PDF、PNG、ZIP、文本、JavaScript、JSON、HTML、Python、gzip、ELF）的标签，并把概率与 ONNX Runtime 的输出比较。标签在两个系统上都必须一致。Linux 上概率最大绝对误差不超过 1e-3；Windows 允许 0.08，用来盖住检出换行和 libm 造成的尖峰漂移。样本在 `.gitattributes` 里标成 binary，避免 Windows 把 LF 改成 CRLF。ONNX Runtime 只用于生成那份对照，不是运行时依赖。
 
-GitHub Actions 在 `ubuntu-latest` 和 `windows-latest` 上跑同一条 `dotnet test`。推送 `v*` tag（当前版本是 `v0.1.0`）或手动跑 Release workflow 时，会用 Native AOT 打出 `linux-x64` 和 `win-x64` 的 zip，并附上 `SHA256SUMS.txt`。每个 zip 里有 `RUN.txt`。
+GitHub Actions 在 `ubuntu-latest` 和 `windows-latest` 上跑同一条 `dotnet test`。推送 `v*` tag（当前版本是 `v0.1.1`）或手动跑 Release workflow 时，会用 Native AOT 打出 `linux-x64`、`osx-arm64` 和 `win-x64` 的 zip，并附上 `SHA256SUMS.txt`。`osx-arm64` 在 `macos-latest`（Apple Silicon）上构建并链接。每个 zip 里有 `RUN.txt`。
 
 ## English
 
 Magika.NET identifies file content types with Google's Magika `standard_v3_3` model on .NET 11. `MagikaSession.Identify` accepts a path, a stream, or bytes and returns the label, MIME type, group, score, and overwrite reason used by upstream Magika (per-label thresholds, overwrite map, beginning/end tokens).
 
-ONNX runs in-process. The interpreter is original C# in the style of SimdPaddleOCR: handwritten AVX-512 and AVX2/FMA GEMM, no ONNX Runtime and no native inference library. SimdPaddleOCR itself is not referenced; its OCR operator set does not cover this graph. See `THIRD-PARTY-NOTICES.md` for the Google model license and that design credit.
+ONNX runs in-process. The interpreter is original C# in the style of SimdPaddleOCR: handwritten AVX-512 and AVX2/FMA GEMM, no ONNX Runtime and no native inference library. Other CPUs, including Apple Silicon, use `System.Numerics.Vector<float>`. SimdPaddleOCR itself is not referenced; its OCR operator set does not cover this graph. See `THIRD-PARTY-NOTICES.md` for the Google model license and that design credit.
 
-The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the tool command name is `magika`. This build does not ship Magika's YARA rules. A `v*` tag such as `v0.1.0` publishes Native AOT zips for `linux-x64` and `win-x64`.
+The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the tool command name is `magika`. This build does not ship Magika's YARA rules. A `v*` tag such as `v0.1.1` publishes Native AOT zips for `linux-x64`, `osx-arm64`, and `win-x64`. The `osx-arm64` binary is built on `macos-latest`.

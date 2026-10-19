@@ -11,6 +11,15 @@ Linux（在 ubuntu-latest 上构建，需要兼容的 glibc）:
   ./magika example.pdf
   ./magika --json example.pdf
 
+macOS（Apple Silicon / arm64，在 macos-latest 上构建）:
+
+  chmod +x magika
+  ./magika --version
+  ./magika example.pdf
+  ./magika --json example.pdf
+
+下载后若被系统拦截，在终端执行 `xattr -d com.apple.quarantine ./magika`。
+
 Windows:
 
   magika.exe --version
@@ -25,5 +34,6 @@ Windows:
 English
 
 This directory is one Native AOT release. The standard_v3_3 model is embedded.
-Run ./magika <file> on Linux or magika.exe <file> on Windows.
+Run ./magika <file> on Linux or macOS Apple Silicon, or magika.exe <file> on Windows.
+If macOS blocks the downloaded binary, run `xattr -d com.apple.quarantine ./magika`.
 Text output is "path: label score mime group". See --help for the other flags.
