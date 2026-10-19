@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Runtime.ExceptionServices;
+using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
 
 namespace Magika;
@@ -58,9 +59,10 @@ public sealed partial class MagikaSession
 
     /// <summary>
     /// Identifies many filesystem paths. Results match <paramref name="paths"/> order.
-    /// Files are read concurrently. Model inputs are scored in batches on the inference pool.
+    /// Files are read in windows of <see cref="StreamWindowSize"/> so a window can be scored while the next one is read.
+    /// Model inputs are scored in batches on the inference pool.
     /// Directories, symlinks, empty files, and short inputs use the same rules as <see cref="IdentifyPath"/>.
-    /// The first read error, in input order, is thrown after the reads finish.
+    /// The first read error, in input order, is thrown. Later windows are not read.
     /// </summary>
     public MagikaResult[] IdentifyPaths(IReadOnlyList<string> paths)
     {
@@ -72,22 +74,69 @@ public sealed partial class MagikaSession
             return results;
         }
 
-        int width = _model.FeaturesSize;
-        int[] staging = new int[count * width];
-        Prepared[] prepared = new Prepared[count];
-        Parallel.For(
-            0,
-            count,
-            new ParallelOptions { MaxDegreeOfParallelism = IoParallelism(count) },
-            i => prepared[i] = PreparePath(paths[i], staging.AsSpan(i * width, width)));
-        Publish(paths, staging, prepared, results);
+        var channel = OpenWindows();
+        Exception? producerError = null;
+        Task producer = Task.Run(() =>
+        {
+            try
+            {
+                Produce(paths, channel.Writer);
+            }
+            catch (ChannelClosedException)
+            {
+            }
+            catch (Exception ex)
+            {
+                producerError = ex;
+                channel.Writer.TryComplete(ex);
+            }
+        });
+
+        Exception? consumeError = null;
+        try
+        {
+            Consume(channel.Reader, paths, results);
+        }
+        catch (Exception ex)
+        {
+            consumeError = ex;
+        }
+        finally
+        {
+            channel.Writer.TryComplete();
+        }
+
+        try
+        {
+            producer.GetAwaiter().GetResult();
+        }
+        catch (ChannelClosedException)
+        {
+        }
+        catch (Exception ex) when (producerError is null)
+        {
+            producerError = ex;
+        }
+
+        if (consumeError is not null)
+        {
+            ExceptionDispatchInfo.Capture(consumeError).Throw();
+        }
+
+        if (producerError is not null)
+        {
+            ExceptionDispatchInfo.Capture(producerError).Throw();
+        }
+
         return results;
     }
 
     /// <summary>
     /// Identifies many filesystem paths without blocking the caller on IO.
+    /// Paths are read in windows of <see cref="StreamWindowSize"/> and scored as each window arrives.
     /// Cancellation is observed between reads. A forward pass already running finishes.
     /// Results match <paramref name="paths"/> order.
+    /// The first read error, in input order, is thrown. Later windows are not read.
     /// </summary>
     public async Task<MagikaResult[]> IdentifyPathsAsync(IReadOnlyList<string> paths, CancellationToken cancellationToken = default)
     {
@@ -100,24 +149,203 @@ public sealed partial class MagikaSession
             return results;
         }
 
-        int width = _model.FeaturesSize;
-        int[] staging = new int[count * width];
-        Prepared[] prepared = new Prepared[count];
-        await Parallel.ForEachAsync(
-            Enumerable.Range(0, count),
-            new ParallelOptions
+        var channel = OpenWindows();
+        Task producing = ProduceAsync(paths, channel.Writer, cancellationToken);
+        try
+        {
+            await ConsumeAsync(channel.Reader, paths, results, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            channel.Writer.TryComplete();
+            try
             {
-                CancellationToken = cancellationToken,
-                MaxDegreeOfParallelism = IoParallelism(count),
-            },
-            async (i, token) => prepared[i] = await PreparePathAsync(paths[i], staging, i * width, token).ConfigureAwait(false)).ConfigureAwait(false);
-        Publish(paths, staging, prepared, results);
+                await producing.ConfigureAwait(false);
+            }
+            catch (ChannelClosedException)
+            {
+            }
+        }
+
         return results;
     }
 
-    private void Publish(IReadOnlyList<string> paths, int[] staging, Prepared[] prepared, MagikaResult[] results)
+    private const int StreamWindowSize = 64;
+
+    private static Channel<StreamWindow> OpenWindows() =>
+        Channel.CreateBounded<StreamWindow>(new BoundedChannelOptions(2)
+        {
+            SingleReader = true,
+            SingleWriter = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        });
+
+    private void Produce(IReadOnlyList<string> paths, ChannelWriter<StreamWindow> writer)
     {
-        for (int i = 0; i < prepared.Length; i++)
+        int count = paths.Count;
+        for (int start = 0; start < count; start += StreamWindowSize)
+        {
+            int take = Math.Min(StreamWindowSize, count - start);
+            StreamWindow window = ReadWindow(paths, start, take);
+            try
+            {
+                if (!writer.TryWrite(window))
+                {
+                    writer.WriteAsync(window).AsTask().ConfigureAwait(false).GetAwaiter().GetResult();
+                }
+            }
+            catch (ChannelClosedException)
+            {
+                ArrayPool<ushort>.Shared.Return(window.Tokens);
+                return;
+            }
+        }
+
+        writer.TryComplete();
+    }
+
+    private async Task ProduceAsync(IReadOnlyList<string> paths, ChannelWriter<StreamWindow> writer, CancellationToken cancellationToken)
+    {
+        try
+        {
+            int count = paths.Count;
+            for (int start = 0; start < count; start += StreamWindowSize)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int take = Math.Min(StreamWindowSize, count - start);
+                StreamWindow window = await ReadWindowAsync(paths, start, take, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await writer.WriteAsync(window, cancellationToken).ConfigureAwait(false);
+                }
+                catch (ChannelClosedException)
+                {
+                    ArrayPool<ushort>.Shared.Return(window.Tokens);
+                    return;
+                }
+            }
+
+            writer.TryComplete();
+        }
+        catch (ChannelClosedException)
+        {
+        }
+        catch (Exception ex)
+        {
+            writer.TryComplete(ex);
+            throw;
+        }
+    }
+
+    private void Consume(ChannelReader<StreamWindow> reader, IReadOnlyList<string> paths, MagikaResult[] results)
+    {
+        try
+        {
+            while (reader.WaitToReadAsync().AsTask().ConfigureAwait(false).GetAwaiter().GetResult())
+            {
+                while (reader.TryRead(out StreamWindow? window))
+                {
+                    try
+                    {
+                        PublishWindow(window, paths, results);
+                    }
+                    finally
+                    {
+                        ArrayPool<ushort>.Shared.Return(window.Tokens);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            while (reader.TryRead(out StreamWindow? extra))
+            {
+                ArrayPool<ushort>.Shared.Return(extra.Tokens);
+            }
+
+            throw;
+        }
+    }
+
+    private async Task ConsumeAsync(ChannelReader<StreamWindow> reader, IReadOnlyList<string> paths, MagikaResult[] results, CancellationToken cancellationToken)
+    {
+        try
+        {
+            while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                while (reader.TryRead(out StreamWindow? window))
+                {
+                    try
+                    {
+                        PublishWindow(window, paths, results);
+                    }
+                    finally
+                    {
+                        ArrayPool<ushort>.Shared.Return(window.Tokens);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            while (reader.TryRead(out StreamWindow? extra))
+            {
+                ArrayPool<ushort>.Shared.Return(extra.Tokens);
+            }
+
+            throw;
+        }
+    }
+
+    private StreamWindow ReadWindow(IReadOnlyList<string> paths, int start, int take)
+    {
+        int width = _model.FeaturesSize;
+        ushort[] tokens = ArrayPool<ushort>.Shared.Rent(take * width);
+        var prepared = new Prepared[take];
+        try
+        {
+            Parallel.For(
+                0,
+                take,
+                new ParallelOptions { MaxDegreeOfParallelism = IoParallelism(take) },
+                i => prepared[i] = PreparePath(paths[start + i], tokens.AsSpan(i * width, width)));
+            return new StreamWindow(start, take, tokens, prepared);
+        }
+        catch
+        {
+            ArrayPool<ushort>.Shared.Return(tokens);
+            throw;
+        }
+    }
+
+    private async Task<StreamWindow> ReadWindowAsync(IReadOnlyList<string> paths, int start, int take, CancellationToken cancellationToken)
+    {
+        int width = _model.FeaturesSize;
+        ushort[] tokens = ArrayPool<ushort>.Shared.Rent(take * width);
+        var prepared = new Prepared[take];
+        try
+        {
+            await Parallel.ForEachAsync(
+                Enumerable.Range(0, take),
+                new ParallelOptions
+                {
+                    CancellationToken = cancellationToken,
+                    MaxDegreeOfParallelism = IoParallelism(take),
+                },
+                async (i, token) => prepared[i] = await PreparePathAsync(paths[start + i], tokens, i * width, token).ConfigureAwait(false)).ConfigureAwait(false);
+            return new StreamWindow(start, take, tokens, prepared);
+        }
+        catch
+        {
+            ArrayPool<ushort>.Shared.Return(tokens);
+            throw;
+        }
+    }
+
+    private void PublishWindow(StreamWindow window, IReadOnlyList<string> paths, MagikaResult[] results)
+    {
+        Prepared[] prepared = window.Prepared;
+        for (int i = 0; i < window.Count; i++)
         {
             if (prepared[i].Error is Exception error)
             {
@@ -127,7 +355,7 @@ public sealed partial class MagikaSession
 
         int width = _model.FeaturesSize;
         int rows = 0;
-        for (int i = 0; i < prepared.Length; i++)
+        for (int i = 0; i < window.Count; i++)
         {
             if (prepared[i].Model)
             {
@@ -135,7 +363,7 @@ public sealed partial class MagikaSession
             }
             else
             {
-                results[i] = prepared[i].Early!;
+                results[window.Start + i] = prepared[i].Early!;
             }
         }
 
@@ -144,33 +372,45 @@ public sealed partial class MagikaSession
             return;
         }
 
-        int[] packed;
-        int[] owner = new int[rows];
-        if (rows == prepared.Length)
+        ushort[]? rented = null;
+        try
         {
-            packed = staging;
-            for (int i = 0; i < prepared.Length; i++)
+            ushort[] packed;
+            int[] owner = new int[rows];
+            if (rows == window.Count)
             {
-                owner[i] = i;
-            }
-        }
-        else
-        {
-            packed = new int[rows * width];
-            int cursor = 0;
-            for (int i = 0; i < prepared.Length; i++)
-            {
-                if (!prepared[i].Model)
+                packed = window.Tokens;
+                for (int i = 0; i < window.Count; i++)
                 {
-                    continue;
+                    owner[i] = window.Start + i;
                 }
+            }
+            else
+            {
+                rented = ArrayPool<ushort>.Shared.Rent(rows * width);
+                packed = rented;
+                int cursor = 0;
+                for (int i = 0; i < window.Count; i++)
+                {
+                    if (!prepared[i].Model)
+                    {
+                        continue;
+                    }
 
-                staging.AsSpan(i * width, width).CopyTo(packed.AsSpan(cursor * width, width));
-                owner[cursor++] = i;
+                    window.Tokens.AsSpan(i * width, width).CopyTo(packed.AsSpan(cursor * width, width));
+                    owner[cursor++] = window.Start + i;
+                }
+            }
+
+            InferPacked(packed, rows, owner, results, index => paths[index]);
+        }
+        finally
+        {
+            if (rented is not null)
+            {
+                ArrayPool<ushort>.Shared.Return(rented);
             }
         }
-
-        InferPacked(packed, rows, owner, results, index => paths[index]);
     }
 
     private void InferPacked(int[] packed, int rows, int[] owner, MagikaResult[] results, Func<int, string?>? pathAt)
@@ -221,6 +461,54 @@ public sealed partial class MagikaSession
         });
     }
 
+    private void InferPacked(ushort[] packed, int rows, int[] owner, MagikaResult[] results, Func<int, string?>? pathAt)
+    {
+        int width = _model.FeaturesSize;
+        int batchSize = _options.BatchSize;
+        int chunks = (rows + batchSize - 1) / batchSize;
+        Parallel.For(0, chunks, new ParallelOptions { MaxDegreeOfParallelism = _workerCount }, chunk =>
+        {
+            int start = chunk * batchSize;
+            int take = Math.Min(batchSize, rows - start);
+            int run = take;
+            ushort[]? rented = null;
+            ReadOnlySpan<ushort> tokens = packed.AsSpan(start * width, take * width);
+            if (take < batchSize && start > 0)
+            {
+                run = batchSize;
+                rented = ArrayPool<ushort>.Shared.Rent(run * width);
+                tokens.CopyTo(rented);
+                ReadOnlySpan<ushort> last = rented.AsSpan((take - 1) * width, width);
+                for (int pad = take; pad < run; pad++)
+                {
+                    last.CopyTo(rented.AsSpan(pad * width, width));
+                }
+
+                tokens = rented.AsSpan(0, run * width);
+            }
+
+            try
+            {
+                InferenceLane[] lanes = Pool();
+                InferenceLane lane = lanes[chunk % lanes.Length];
+                float[] scores = RunLane(lane, tokens, run, width);
+                int labels = scores.Length / run;
+                for (int row = 0; row < take; row++)
+                {
+                    int index = owner[start + row];
+                    results[index] = DecideScores(scores.AsSpan(row * labels, labels), pathAt?.Invoke(index));
+                }
+            }
+            finally
+            {
+                if (rented is not null)
+                {
+                    ArrayPool<ushort>.Shared.Return(rented);
+                }
+            }
+        });
+    }
+
     private float[] RunLane(InferenceLane lane, ReadOnlySpan<int> tokens, int batch, int sequence)
     {
         lock (lane.Gate)
@@ -242,7 +530,28 @@ public sealed partial class MagikaSession
         }
     }
 
-    private Prepared PreparePath(string path, Span<int> features)
+    private float[] RunLane(InferenceLane lane, ReadOnlySpan<ushort> tokens, int batch, int sequence)
+    {
+        lock (lane.Gate)
+        {
+            int previous = Onnx.SimdGemm.ThreadBudget;
+            try
+            {
+                if (_gemmThreadsPerLane > 0)
+                {
+                    Onnx.SimdGemm.ThreadBudget = _gemmThreadsPerLane;
+                }
+
+                return lane.Session.RunCompact(tokens, batch, sequence, _model.PaddingToken);
+            }
+            finally
+            {
+                Onnx.SimdGemm.ThreadBudget = previous;
+            }
+        }
+    }
+
+    private Prepared PreparePath(string path, Span<ushort> features)
     {
         try
         {
@@ -268,7 +577,7 @@ public sealed partial class MagikaSession
         }
     }
 
-    private async Task<Prepared> PreparePathAsync(string path, int[] staging, int offset, CancellationToken cancellationToken)
+    private async Task<Prepared> PreparePathAsync(string path, ushort[] staging, int offset, CancellationToken cancellationToken)
     {
         try
         {
@@ -295,7 +604,7 @@ public sealed partial class MagikaSession
         }
     }
 
-    private Prepared FromEnds(string path, ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, Span<int> features)
+    private Prepared FromEnds(string path, ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, Span<ushort> features)
     {
         if (!_options.UseModel)
         {
@@ -366,6 +675,17 @@ public sealed partial class MagikaSession
         public static Prepared ForModel() => new(true, null, null);
 
         public static Prepared Failed(Exception error) => new(false, null, error);
+    }
+
+    private sealed class StreamWindow(int start, int count, ushort[] tokens, Prepared[] prepared)
+    {
+        public int Start { get; } = start;
+
+        public int Count { get; } = count;
+
+        public ushort[] Tokens { get; } = tokens;
+
+        public Prepared[] Prepared { get; } = prepared;
     }
 
     private sealed class InferenceLane(Onnx.OnnxSession session, Lock gate)

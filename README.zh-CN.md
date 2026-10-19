@@ -24,7 +24,7 @@ Console.WriteLine(result.Score);
 
 `IdentifyAsync` 和 `IdentifyPathAsync` 接受 `CancellationToken`，读取的仍是同一段前缀和后缀。路径使用 `RandomAccess.ReadAsync`。库和 CLI 用 `<Features>$(Features);runtime-async=on</Features>` 编译异步方法。取消只作用于读取；ONNX 推理本身是同步的。
 
-`IdentifyPaths` 和 `IdentifyPathsAsync` 保持输入顺序。它们并发读取多个路径，再按批给特征向量打分（`MagikaOptions.BatchSize`，默认 8），用的是一池托管会话（`InferenceWorkers`）。`IdentifyFeatures` 和 `IdentifyFeaturesBatch` 给已经抽好的向量打分（这个模型每行 2048 个整数）。一个会话可以跨线程共用：单文件调用占用一条推理通道，多文件 API 使用通道池。通道池在第一次多文件调用时创建。各通道共享模型权重，激活暂存各自独立。一条通道同一时间只跑一次前向。`InferenceWorkers` 为 0 时，专用模型只用一条通道，卷积占用全部处理器。专用卷积本身已经并行，再按核数开通道会抢核、抢缓存。仍走解释器的图则还是每个处理器一条通道。显式指定的通道数按原值使用，不设上限；多出来的通道会把卷积线程拆开，使通道数乘每通道线程数接近处理器数量。
+`IdentifyPaths` 和 `IdentifyPathsAsync` 保持输入顺序。它们按 64 个路径为一窗读取，打分当前窗时继续读下一窗。模型行按批打分（`MagikaOptions.BatchSize`，默认 8），用的是一池托管会话（`InferenceWorkers`）。`IdentifyFeatures` 和 `IdentifyFeaturesBatch` 给已经抽好的向量打分（这个模型每行 2048 个整数）。一个会话可以跨线程共用：单文件调用占用一条推理通道，多文件 API 使用通道池。通道池在第一次多文件调用时创建。各通道共享模型权重，激活暂存各自独立。一条通道同一时间只跑一次前向。`InferenceWorkers` 为 0 时，专用模型只用一条通道，卷积占用全部处理器。专用卷积本身已经并行，再按核数开通道会抢核、抢缓存。仍走解释器的图则还是每个处理器一条通道。显式指定的通道数按原值使用，不设上限；多出来的通道会把卷积线程拆开，使通道数乘每通道线程数接近处理器数量。
 
 ```csharp
 MagikaSession session = MagikaSession.Create(new MagikaOptions
