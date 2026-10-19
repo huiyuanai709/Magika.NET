@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Stage a Native AOT publish directory into a release zip.
-# Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>
+# Usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [isa]
+# isa is avx2 or avx512 for linux-x64 and win-x64, and omitted for osx-arm64.
 # The zip contains magika (or magika.exe), RUN.txt, LICENSE, THIRD-PARTY-NOTICES.md, and VERSION.txt.
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path>" >&2
+if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
+  echo "usage: stage-release.sh <rid> <tag> <publish-dir> <zip-path> [avx2|avx512]" >&2
   exit 2
 fi
 
@@ -13,6 +14,7 @@ rid="$1"
 tag="$2"
 publish_dir="$3"
 zip_path="$4"
+isa="${5:-}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$rid" in
@@ -21,6 +23,26 @@ case "$rid" in
   *)
     echo "unsupported rid: ${rid}" >&2
     exit 2
+    ;;
+esac
+
+case "$rid" in
+  linux-x64|win-x64)
+    case "$isa" in
+      avx2|avx512) sku="${rid}-${isa}" ;;
+      *)
+        echo "x64 releases require isa avx2 or avx512" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  osx-arm64)
+    if [ -n "$isa" ]; then
+      echo "osx-arm64 does not take an instruction set" >&2
+      exit 2
+    fi
+    sku="$rid"
+    isa="arm64"
     ;;
 esac
 
@@ -55,7 +77,7 @@ if [ "$expect_exec" -eq 1 ]; then
 fi
 
 cp "$root/LICENSE" "$root/THIRD-PARTY-NOTICES.md" "$root/packaging/RUN.txt" "$stage/"
-printf 'tag=%s\nrid=%s\nbinary=%s\nlicense=Apache-2.0\nmodel=standard_v3_3\n' "$tag" "$rid" "$binary" > "$stage/VERSION.txt"
+printf 'tag=%s\nrid=%s\nisa=%s\nbinary=%s\nlicense=Apache-2.0\nmodel=standard_v3_3\n' "$tag" "$rid" "$isa" "$binary" > "$stage/VERSION.txt"
 
 mkdir -p -- "$(dirname -- "$zip_path")"
 case "$zip_path" in
@@ -74,7 +96,7 @@ fi
 
 STAGE_DIR="$stage" \
   ZIP_PATH="$zip_path" \
-  ZIP_PREFIX="magika-${tag}-${rid}" \
+  ZIP_PREFIX="magika-${tag}-${sku}" \
   BINARY_NAME="$binary" \
   EXPECT_EXEC="$expect_exec" \
   "$py" - <<'PY'
