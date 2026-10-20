@@ -15,6 +15,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Magika\Magika.csproj" />
+    <InternalsVisibleTo Include="Magika.Tests" />
   </ItemGroup>
 
   <!-- Native AOT folds IsSupported into a constant. Without an instruction set,
