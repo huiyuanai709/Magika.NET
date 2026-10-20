@@ -77,7 +77,8 @@ fi
 
 "$binary" --version
 "$binary" --help >/dev/null
-out="$("$binary" "$fixture")"
+# Default text is "path: description (group)". -l prints "path: label".
+out="$("$binary" -l "$fixture")"
 echo "$out"
 label="${out#*: }"
 label="${label%% *}"
