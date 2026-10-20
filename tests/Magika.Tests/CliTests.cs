@@ -45,7 +45,7 @@ public class CliTests
 
         Assert.Equal(0, shortCode);
         Assert.Equal(0, longCode);
-        Assert.Contains("0.1.4", shortText);
+        Assert.Contains("0.1.5", shortText);
         Assert.Contains("standard_v3_3", shortText);
         Assert.Equal(shortText, stdout.ToString());
     }
