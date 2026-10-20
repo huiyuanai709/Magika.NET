@@ -48,13 +48,18 @@ The CLI project is `src/Magika.Cli`. Its assembly name is `Magika.Cli` and the c
 
 ```bash
 dotnet run --project src/Magika.Cli -c Release -- sample.pdf
-dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- -r --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- --jsonl -s ./files
 dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./files/*
 ```
 
-Text output is `path: label score mime group`, in the same order as the arguments. One path uses `IdentifyPathAsync`. Several paths are read concurrently and scored with `IdentifyPathsAsync`. `--batch-size` (default 8, range 1..64) is how many feature rows share a forward pass. `--workers` (default 0) is the inference pool. Automatic mode uses one lane for this specialized model so the convolution can use every processor, and one lane per processor for an interpreter graph. An explicit count is used as given, with no cap. Each lane is a managed session over the same weights. Extra lanes split the convolution's thread budget. This stays on the managed interpreter.
+The flags match the upstream Magika CLI. `-r` / `--recursive` identifies files inside directories. Without it, a directory is reported as `directory`. `-` reads standard input once. `--no-dereference` reports a symlink as `symlink`. `--json` prints a pretty JSON array and `--jsonl` prints one compact JSON object per line, both in the upstream `path` / `result.status` / `result.value` shape (`dl`, `output`, and `score`). `-s` adds a truncated percent score, `-i` prints the MIME type, and `-l` prints the label. `--format` accepts `%p %l %d %g %m %e %s %S %b %%`. Those modifiers cannot be combined with `--json`, `--jsonl`, or `--format`, and `-i` cannot be combined with `-l`. `--colors` and `--no-colors` are mutually exclusive. Colors are used when stdout is a terminal, unless `NO_COLOR` is set.
 
-`--version` prints the library version and the model name. A binary published with Satori GC adds a second line, `gc: satori`. Exit code `1` means a file could not be read. Exit code `2` means the arguments were invalid.
+The default line is `path: description (group)`, the same shape as upstream. The previous Magika.NET line was `path: label score mime group`. `--format "%p: %l %s %m %g"` is the close equivalent (`%s` prints two digits). JSON scores are truncated to three decimal places. Per-file errors stay in the output (and in JSON as `file_does_not_exist`, `permission_error`, `directory_cycle`, or `unknown`) and the process exits `1` after the remaining paths. Exit code `2` means the arguments were invalid.
+
+If an argument contains `*` or `?` and that exact path does not exist, the CLI expands it as a file-name pattern. An existing path is kept as written. One content path uses `IdentifyPathAsync`. Several paths are read concurrently and scored with `IdentifyPathsAsync`. `--batch-size` (default 8, range 1..64) is how many feature rows share a forward pass. `--workers` (default 0) is the inference pool. Automatic mode uses one lane for this specialized model so the convolution can use every processor, and one lane per processor for an interpreter graph. An explicit count is used as given, with no cap. Each lane is a managed session over the same weights. Extra lanes split the convolution's thread budget. This stays on the managed interpreter.
+
+`-V` / `--version` prints the library version and the model name. A binary published with Satori GC adds a second line, `gc: satori`.
 
 A release binary is `./magika` on Linux and macOS, and `magika.exe` on Windows. See `RUN.txt` inside each zip.
 

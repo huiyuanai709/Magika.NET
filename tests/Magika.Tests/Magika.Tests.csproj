@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Magika\Magika.csproj" />
+    <ProjectReference Include="..\..\src\Magika.Cli\Magika.Cli.csproj" />
   </ItemGroup>
 
   <ItemGroup>

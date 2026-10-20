@@ -30,11 +30,13 @@ x64 有两份包。VERSION.txt 的 isa 是 avx2 或 avx512。
 avx2 包需要 CPU 支持 AVX2。avx512 包需要 AVX-512，只有 AVX2 的机器跑不了。
 macOS 包是 arm64，只有一份。VERSION.txt 的 isa 是 apple-m1（AdvSimd）。M 系列可以运行。
 
-文本输出是「路径: 标签 分数 MIME 分组」。
+默认文本是「路径: 描述 (分组)」，与上游 Magika CLI 一致。
+-r 递归识别目录中的文件。- 从标准输入读一次。-s 追加百分比分数，-i 打印 MIME，-l 打印标签。
+--json 是 JSON 数组，--jsonl 是每行一个 JSON 对象。--format 使用 %p %l %d %g %m %e %s %S %b %%。
 --prediction-mode 可以是 high、medium 或 best-guess，默认 high。
 --no-dereference 把符号链接标成 symlink，而不是跟随目标。
-多个文件会并发读取，再按批推理。--batch-size 默认 8（1..64）。--workers 默认 0（每个处理器一条通道，没有上限）。
-退出码：成功 0，找不到文件 1，参数错误 2。
+多个文件会并发读取，再按批推理。--batch-size 默认 8（1..64）。--workers 默认 0（自动通道数）。
+退出码：成功 0，有文件读不到 1，参数错误 2。-V 与 --version 相同。
 
 English
 
@@ -44,5 +46,7 @@ x64 zips are split by instruction set. VERSION.txt isa is avx2 or avx512.
 The avx2 build needs AVX2. The avx512 build needs AVX-512 and will not run on AVX2-only CPUs.
 The macOS build is one arm64 binary. VERSION.txt isa is apple-m1 (AdvSimd). It runs on Apple Silicon.
 If macOS blocks the downloaded binary, run `xattr -d com.apple.quarantine ./magika`.
-Text output is "path: label score mime group", in argument order.
+Text output is "path: description (group)", matching the upstream Magika CLI.
+-r walks directories, - reads stdin once, and -s/-i/-l/--json/--jsonl/--format follow upstream.
 Several files are read concurrently and scored in batches. See --help for --batch-size and --workers.
+-V is an alias of --version. Exit code 1 means at least one path failed; 2 means bad arguments.

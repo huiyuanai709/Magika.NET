@@ -48,13 +48,18 @@ MagikaSession session = MagikaSession.Create(new MagikaOptions
 
 ```bash
 dotnet run --project src/Magika.Cli -c Release -- sample.pdf
-dotnet run --project src/Magika.Cli -c Release -- --json --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- -r --prediction-mode medium --no-dereference ./files
+dotnet run --project src/Magika.Cli -c Release -- --jsonl ./files
 dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./files/*
 ```
 
-文本输出是 `路径: 标签 分数 MIME 分组`，顺序与参数一致。单个路径走 `IdentifyPathAsync`。多个路径并发读取，再用 `IdentifyPathsAsync` 打分。`--batch-size`（默认 8，范围 1..64）是一次前向里的特征行数。`--workers`（默认 0）是推理池。自动模式对这个专用模型只用一条通道，卷积可以使用全部处理器；解释器图则每个处理器一条通道。显式给出的数量会按原值使用，不设上限。每条通道是同一份权重上的托管会话。增加通道会把卷积的线程预算拆开。推理仍然是托管解释器。
+参数与上游 Magika CLI 对齐。`-r` / `--recursive` 会识别目录里面的文件；不加 `-r` 时，目录本身报告为 `directory`。`-` 从标准输入读一次。`--no-dereference` 把符号链接标成 `symlink`。`--json` 打印漂亮打印的 JSON 数组，`--jsonl` 每行一个紧凑 JSON 对象，结构都是上游的 `path` / `result.status` / `result.value`（`dl`、`output`、`score`）。`-s` 追加截断后的百分比分数，`-i` 打印 MIME，`-l` 打印标签。`--format` 支持 `%p %l %d %g %m %e %s %S %b %%`。这些修饰符不能和 `--json`、`--jsonl`、`--format` 一起用，`-i` 和 `-l` 也不能一起用。`--colors` 和 `--no-colors` 互斥。标准输出是终端时才上色，设置了 `NO_COLOR` 则不上色。
 
-`--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。退出码 `1` 表示文件读不到。退出码 `2` 表示参数无效。
+默认一行是 `路径: 描述 (分组)`，和上游一致。以前 Magika.NET 的一行是 `路径: 标签 分数 MIME 分组`。`--format "%p: %l %s %m %g"` 可以接近旧格式（`%s` 是两位小数）。JSON 里的分数截断到三位小数。单个路径的错误留在输出里（JSON 状态是 `file_does_not_exist`、`permission_error`、`directory_cycle` 或 `unknown`），其余路径仍然识别，进程以退出码 `1` 结束。退出码 `2` 表示参数无效。
+
+参数里如果含有 `*` 或 `?`，并且这个精确路径不存在，CLI 会按文件名模式展开。已经存在的路径保持原样。单个内容路径走 `IdentifyPathAsync`。多个路径并发读取，再用 `IdentifyPathsAsync` 打分。`--batch-size`（默认 8，范围 1..64）是一次前向里的特征行数。`--workers`（默认 0）是推理池。自动模式对这个专用模型只用一条通道，卷积可以使用全部处理器；解释器图则每个处理器一条通道。显式给出的数量会按原值使用，不设上限。每条通道是同一份权重上的托管会话。增加通道会把卷积的线程预算拆开。推理仍然是托管解释器。
+
+`-V` / `--version` 打印库版本和模型名。用 Satori GC 发布的二进制会多打一行 `gc: satori`。
 
 发布包里的程序，Linux 和 macOS 是 `./magika`，Windows 是 `magika.exe`。用法写在每个 zip 的 `RUN.txt` 里。
 
