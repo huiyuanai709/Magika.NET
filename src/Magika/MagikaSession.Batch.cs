@@ -577,6 +577,11 @@ public sealed partial class MagikaSession
 
             int block = blockSize;
             using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
+            if (TryMsixFromHandle(handle, head.Prefix, length, path) is MagikaResult msix)
+            {
+                return Prepared.Done(msix);
+            }
+
             if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
             {
                 return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f));
@@ -623,6 +628,11 @@ public sealed partial class MagikaSession
 
             int block = blockSize;
             using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+            if (await TryMsixFromHandleAsync(handle, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult msix)
+            {
+                return Prepared.Done(msix);
+            }
+
             if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
             {
                 return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f));
@@ -639,6 +649,11 @@ public sealed partial class MagikaSession
 
     private Prepared FromEnds(string path, ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, Span<ushort> features)
     {
+        if (TryMsixWithEnds(prefix, suffix, length, path) is MagikaResult msix)
+        {
+            return Prepared.Done(msix);
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(prefix, _model))
         {
             return Prepared.Done(Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f));

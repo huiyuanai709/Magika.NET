@@ -10,8 +10,9 @@ public enum OverwriteReason
     OverwriteMap,
 
     /// <summary>
-    /// Reserved for upstream format-rule vetoes. This build does not ship the bundled rule engine,
-    /// so identification does not produce this reason.
+    /// A format resolver overwrote or supplied the label.
+    /// Magika.NET currently ships the upstream ZIP→MSIX central-directory check
+    /// (<c>AppxManifest.xml</c> + <c>AppxBlockMap.xml</c>); other rule-only labels stay catalogued only.
     /// </summary>
     RulesVeto,
 }

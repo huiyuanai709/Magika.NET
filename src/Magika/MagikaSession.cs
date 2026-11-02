@@ -265,12 +265,22 @@ public sealed partial class MagikaSession
             return Heuristic(path, "empty", score: 1f);
         }
 
+        if (TryMsix(content, content.Length, path) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         int block = Math.Min(_model.BlockSize, content.Length);
         return IdentifyBlocks(content[..block], content[^block..], content.Length, path);
     }
 
     private MagikaResult IdentifyBlocks(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, string? path)
     {
+        if (TryMsixWithEnds(prefix, suffix, length, path) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         if (!_options.UseModel)
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f);
@@ -317,6 +327,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
+        if (TryMsixFromHandle(handle, head.Prefix, length, path) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -337,6 +352,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Window head = ContentEnds.ReadStreamAt(stream, offset: 0, block);
+        if (TryMsixFromStream(stream, head.Prefix, length, path) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -357,6 +377,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Lease head = await ContentEnds.ReadStreamAtAsync(stream, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (await TryMsixFromStreamAsync(stream, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -393,6 +418,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (await TryMsixFromHandleAsync(handle, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult msix)
+        {
+            return msix;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -435,4 +465,148 @@ public sealed partial class MagikaSession
 
     private static MagikaResult Heuristic(string? path, string label, float score) =>
         new(path, ContentTypes.Get(label), modelContentType: null, score, overwriteReason: null);
+
+    private static MagikaResult Ruled(string? path, string label) =>
+        new(path, ContentTypes.Get(label), modelContentType: null, score: 1f, OverwriteReason.RulesVeto);
+
+    private MagikaResult? TryMsix(ReadOnlySpan<byte> content, long length, string? path)
+    {
+        if (!ZipMsixResolver.WantsTail(content))
+        {
+            return null;
+        }
+
+        ReadOnlySpan<byte> prefix = content.Length <= _model.BlockSize ? content : content[.._model.BlockSize];
+        int tailLen = (int)Math.Min(ZipMsixResolver.TailBytes, content.Length);
+        ReadOnlySpan<byte> tail = content[^tailLen..];
+        long? start = ZipMsixResolver.DirectoryStart(tail, length);
+        if (start is long offset && offset >= 0 && offset < content.Length)
+        {
+            tail = content[(int)offset..];
+        }
+
+        return ZipMsixResolver.IsMsix(prefix, length, tail) ? Ruled(path, "msix") : null;
+    }
+
+    private MagikaResult? TryMsixWithEnds(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, string? path)
+    {
+        if (!ZipMsixResolver.WantsTail(prefix))
+        {
+            return null;
+        }
+
+        // Small inputs: prefix/suffix already cover the archive. Larger ones need the ZIP-aware
+        // tail readers above; this path still catches archives whose directory fits in the suffix.
+        return ZipMsixResolver.IsMsix(prefix, length, suffix) ? Ruled(path, "msix") : null;
+    }
+
+    private MagikaResult? TryMsixFromHandle(SafeFileHandle handle, ReadOnlySpan<byte> prefix, long length, string? path)
+    {
+        if (!ZipMsixResolver.WantsTail(prefix))
+        {
+            return null;
+        }
+
+        int tailLen = (int)Math.Min(ZipMsixResolver.TailBytes, length);
+        using ContentEnds.Window initial = ContentEnds.ReadAt(handle, length - tailLen, tailLen);
+        long? start = ZipMsixResolver.DirectoryStart(initial.Prefix, length);
+        if (start is long offset && offset >= 0 && offset < length)
+        {
+            int extended = (int)(length - offset);
+            if (extended > ZipMsixResolver.DirectoryMaxBytes + ZipMsixResolver.TailBytes)
+            {
+                return null;
+            }
+
+            using ContentEnds.Window full = ContentEnds.ReadAt(handle, offset, extended);
+            return ZipMsixResolver.IsMsix(prefix, length, full.Prefix) ? Ruled(path, "msix") : null;
+        }
+
+        return ZipMsixResolver.IsMsix(prefix, length, initial.Prefix) ? Ruled(path, "msix") : null;
+    }
+
+    private MagikaResult? TryMsixFromStream(Stream stream, ReadOnlySpan<byte> prefix, long length, string? path)
+    {
+        if (!ZipMsixResolver.WantsTail(prefix))
+        {
+            return null;
+        }
+
+        int tailLen = (int)Math.Min(ZipMsixResolver.TailBytes, length);
+        using ContentEnds.Window initial = ContentEnds.ReadStreamAt(stream, length - tailLen, tailLen);
+        long? start = ZipMsixResolver.DirectoryStart(initial.Prefix, length);
+        if (start is long offset && offset >= 0 && offset < length)
+        {
+            int extended = (int)(length - offset);
+            if (extended > ZipMsixResolver.DirectoryMaxBytes + ZipMsixResolver.TailBytes)
+            {
+                return null;
+            }
+
+            using ContentEnds.Window full = ContentEnds.ReadStreamAt(stream, offset, extended);
+            return ZipMsixResolver.IsMsix(prefix, length, full.Prefix) ? Ruled(path, "msix") : null;
+        }
+
+        return ZipMsixResolver.IsMsix(prefix, length, initial.Prefix) ? Ruled(path, "msix") : null;
+    }
+
+    private async Task<MagikaResult?> TryMsixFromHandleAsync(
+        SafeFileHandle handle,
+        byte[] prefix,
+        long length,
+        string? path,
+        CancellationToken cancellationToken)
+    {
+        if (!ZipMsixResolver.WantsTail(prefix))
+        {
+            return null;
+        }
+
+        int tailLen = (int)Math.Min(ZipMsixResolver.TailBytes, length);
+        using ContentEnds.Lease initial = await ContentEnds.ReadAtAsync(handle, length - tailLen, tailLen, length, cancellationToken).ConfigureAwait(false);
+        long? start = ZipMsixResolver.DirectoryStart(initial.Prefix, length);
+        if (start is long offset && offset >= 0 && offset < length)
+        {
+            int extended = (int)(length - offset);
+            if (extended > ZipMsixResolver.DirectoryMaxBytes + ZipMsixResolver.TailBytes)
+            {
+                return null;
+            }
+
+            using ContentEnds.Lease full = await ContentEnds.ReadAtAsync(handle, offset, extended, length, cancellationToken).ConfigureAwait(false);
+            return ZipMsixResolver.IsMsix(prefix, length, full.Prefix) ? Ruled(path, "msix") : null;
+        }
+
+        return ZipMsixResolver.IsMsix(prefix, length, initial.Prefix) ? Ruled(path, "msix") : null;
+    }
+
+    private async Task<MagikaResult?> TryMsixFromStreamAsync(
+        Stream stream,
+        byte[] prefix,
+        long length,
+        string? path,
+        CancellationToken cancellationToken)
+    {
+        if (!ZipMsixResolver.WantsTail(prefix))
+        {
+            return null;
+        }
+
+        int tailLen = (int)Math.Min(ZipMsixResolver.TailBytes, length);
+        using ContentEnds.Lease initial = await ContentEnds.ReadStreamAtAsync(stream, length - tailLen, tailLen, length, cancellationToken).ConfigureAwait(false);
+        long? start = ZipMsixResolver.DirectoryStart(initial.Prefix, length);
+        if (start is long offset && offset >= 0 && offset < length)
+        {
+            int extended = (int)(length - offset);
+            if (extended > ZipMsixResolver.DirectoryMaxBytes + ZipMsixResolver.TailBytes)
+            {
+                return null;
+            }
+
+            using ContentEnds.Lease full = await ContentEnds.ReadStreamAtAsync(stream, offset, extended, length, cancellationToken).ConfigureAwait(false);
+            return ZipMsixResolver.IsMsix(prefix, length, full.Prefix) ? Ruled(path, "msix") : null;
+        }
+
+        return ZipMsixResolver.IsMsix(prefix, length, initial.Prefix) ? Ruled(path, "msix") : null;
+    }
 }
