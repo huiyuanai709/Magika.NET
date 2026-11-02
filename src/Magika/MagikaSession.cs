@@ -1,4 +1,5 @@
 using System.Buffers;
+using Magika.Resolvers;
 using Microsoft.Win32.SafeHandles;
 
 namespace Magika;
@@ -265,12 +266,22 @@ public sealed partial class MagikaSession
             return Heuristic(path, "empty", score: 1f);
         }
 
+        if (TryResolve(content, content.Length, path) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         int block = Math.Min(_model.BlockSize, content.Length);
         return IdentifyBlocks(content[..block], content[^block..], content.Length, path);
     }
 
     private MagikaResult IdentifyBlocks(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, string? path)
     {
+        if (TryResolveWithEnds(prefix, suffix, length, path) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         if (!_options.UseModel)
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(prefix, length), score: 1f);
@@ -317,6 +328,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
+        if (TryResolveFromHandle(handle, head.Prefix, length, path) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -337,6 +353,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Window head = ContentEnds.ReadStreamAt(stream, offset: 0, block);
+        if (TryResolveFromStream(stream, head.Prefix, length, path) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -357,6 +378,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Lease head = await ContentEnds.ReadStreamAtAsync(stream, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (await TryResolveFromStreamAsync(stream, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -393,6 +419,11 @@ public sealed partial class MagikaSession
 
         int block = blockSize;
         using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
+        if (await TryResolveFromHandleAsync(handle, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult resolved)
+        {
+            return resolved;
+        }
+
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
         {
             return Heuristic(path, FeatureExtractor.ClassifySmall(head.Prefix, length), score: 1f);
@@ -435,4 +466,184 @@ public sealed partial class MagikaSession
 
     private static MagikaResult Heuristic(string? path, string label, float score) =>
         new(path, ContentTypes.Get(label), modelContentType: null, score, overwriteReason: null);
+
+    private static MagikaResult Ruled(string? path, string label) =>
+        new(path, ContentTypes.Get(label), modelContentType: null, score: 1f, OverwriteReason.RulesVeto);
+
+    private MagikaResult? TryResolve(ReadOnlySpan<byte> content, long length, string? path)
+    {
+        ReadOnlySpan<byte> prefix = content.Length <= ContentResolver.PrefixLimit
+            ? content
+            : content[..ContentResolver.PrefixLimit];
+
+        ReadOnlySpan<byte> tail = ReadOnlySpan<byte>.Empty;
+        if (ContentResolver.WantsZipTail(prefix))
+        {
+            int tailLen = (int)Math.Min(ContentResolver.TailBytes, content.Length);
+            tail = content[^tailLen..];
+            long? start = ContentResolver.DirectoryStart(tail, length);
+            if (start is long offset && offset >= 0 && offset < content.Length)
+            {
+                tail = content[(int)offset..];
+            }
+        }
+
+        return ContentResolver.Identify(prefix, length, tail) is string label
+            ? Ruled(path, label)
+            : null;
+    }
+
+    private MagikaResult? TryResolveWithEnds(ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, string? path)
+    {
+        // For ZIP: suffix may hold EOCD/CD when the archive is small enough that model ends
+        // already cover the directory. Non-ZIP magic only needs the prefix.
+        ReadOnlySpan<byte> tail = ContentResolver.WantsZipTail(prefix) ? suffix : ReadOnlySpan<byte>.Empty;
+        return ContentResolver.Identify(prefix, length, tail) is string label
+            ? Ruled(path, label)
+            : null;
+    }
+
+    private MagikaResult? TryResolveFromHandle(SafeFileHandle handle, ReadOnlySpan<byte> prefix, long length, string? path)
+    {
+        ReadOnlySpan<byte> tail = ReadOnlySpan<byte>.Empty;
+        if (ContentResolver.WantsZipTail(prefix))
+        {
+            int tailLen = (int)Math.Min(ContentResolver.TailBytes, length);
+            using ContentEnds.Window initial = ContentEnds.ReadAt(handle, length - tailLen, tailLen);
+            long? start = ContentResolver.DirectoryStart(initial.Prefix, length);
+            if (start is long offset && offset >= 0 && offset < length)
+            {
+                int extended = (int)(length - offset);
+                if (extended > ContentResolver.DirectoryMaxBytes + ContentResolver.TailBytes)
+                {
+                    // Cannot hold the central directory; still try magic that only needs the prefix.
+                    return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string early
+                        ? Ruled(path, early)
+                        : null;
+                }
+
+                using ContentEnds.Window full = ContentEnds.ReadAt(handle, offset, extended);
+                return ContentResolver.Identify(prefix, length, full.Prefix) is string label
+                    ? Ruled(path, label)
+                    : null;
+            }
+
+            return ContentResolver.Identify(prefix, length, initial.Prefix) is string hit
+                ? Ruled(path, hit)
+                : null;
+        }
+
+        return ContentResolver.Identify(prefix, length, tail) is string resolved
+            ? Ruled(path, resolved)
+            : null;
+    }
+
+    private MagikaResult? TryResolveFromStream(Stream stream, ReadOnlySpan<byte> prefix, long length, string? path)
+    {
+        if (ContentResolver.WantsZipTail(prefix))
+        {
+            int tailLen = (int)Math.Min(ContentResolver.TailBytes, length);
+            using ContentEnds.Window initial = ContentEnds.ReadStreamAt(stream, length - tailLen, tailLen);
+            long? start = ContentResolver.DirectoryStart(initial.Prefix, length);
+            if (start is long offset && offset >= 0 && offset < length)
+            {
+                int extended = (int)(length - offset);
+                if (extended > ContentResolver.DirectoryMaxBytes + ContentResolver.TailBytes)
+                {
+                    return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string early
+                        ? Ruled(path, early)
+                        : null;
+                }
+
+                using ContentEnds.Window full = ContentEnds.ReadStreamAt(stream, offset, extended);
+                return ContentResolver.Identify(prefix, length, full.Prefix) is string label
+                    ? Ruled(path, label)
+                    : null;
+            }
+
+            return ContentResolver.Identify(prefix, length, initial.Prefix) is string hit
+                ? Ruled(path, hit)
+                : null;
+        }
+
+        return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string resolved
+            ? Ruled(path, resolved)
+            : null;
+    }
+
+    private async Task<MagikaResult?> TryResolveFromHandleAsync(
+        SafeFileHandle handle,
+        byte[] prefix,
+        long length,
+        string? path,
+        CancellationToken cancellationToken)
+    {
+        if (ContentResolver.WantsZipTail(prefix))
+        {
+            int tailLen = (int)Math.Min(ContentResolver.TailBytes, length);
+            using ContentEnds.Lease initial = await ContentEnds.ReadAtAsync(handle, length - tailLen, tailLen, length, cancellationToken).ConfigureAwait(false);
+            long? start = ContentResolver.DirectoryStart(initial.Prefix, length);
+            if (start is long offset && offset >= 0 && offset < length)
+            {
+                int extended = (int)(length - offset);
+                if (extended > ContentResolver.DirectoryMaxBytes + ContentResolver.TailBytes)
+                {
+                    return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string early
+                        ? Ruled(path, early)
+                        : null;
+                }
+
+                using ContentEnds.Lease full = await ContentEnds.ReadAtAsync(handle, offset, extended, length, cancellationToken).ConfigureAwait(false);
+                return ContentResolver.Identify(prefix, length, full.Prefix) is string label
+                    ? Ruled(path, label)
+                    : null;
+            }
+
+            return ContentResolver.Identify(prefix, length, initial.Prefix) is string hit
+                ? Ruled(path, hit)
+                : null;
+        }
+
+        return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string resolved
+            ? Ruled(path, resolved)
+            : null;
+    }
+
+    private async Task<MagikaResult?> TryResolveFromStreamAsync(
+        Stream stream,
+        byte[] prefix,
+        long length,
+        string? path,
+        CancellationToken cancellationToken)
+    {
+        if (ContentResolver.WantsZipTail(prefix))
+        {
+            int tailLen = (int)Math.Min(ContentResolver.TailBytes, length);
+            using ContentEnds.Lease initial = await ContentEnds.ReadStreamAtAsync(stream, length - tailLen, tailLen, length, cancellationToken).ConfigureAwait(false);
+            long? start = ContentResolver.DirectoryStart(initial.Prefix, length);
+            if (start is long offset && offset >= 0 && offset < length)
+            {
+                int extended = (int)(length - offset);
+                if (extended > ContentResolver.DirectoryMaxBytes + ContentResolver.TailBytes)
+                {
+                    return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string early
+                        ? Ruled(path, early)
+                        : null;
+                }
+
+                using ContentEnds.Lease full = await ContentEnds.ReadStreamAtAsync(stream, offset, extended, length, cancellationToken).ConfigureAwait(false);
+                return ContentResolver.Identify(prefix, length, full.Prefix) is string label
+                    ? Ruled(path, label)
+                    : null;
+            }
+
+            return ContentResolver.Identify(prefix, length, initial.Prefix) is string hit
+                ? Ruled(path, hit)
+                : null;
+        }
+
+        return ContentResolver.Identify(prefix, length, ReadOnlySpan<byte>.Empty) is string resolved
+            ? Ruled(path, resolved)
+            : null;
+    }
 }

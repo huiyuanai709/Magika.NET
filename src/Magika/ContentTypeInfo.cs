@@ -44,7 +44,7 @@ public sealed class ContentTypeInfo
     /// <summary>Whether the bundled model can emit this label before overwrite.</summary>
     public bool ModelSupport { get; }
 
-    /// <summary>Whether upstream's format rules can emit this label. Magika.NET does not run those rules.</summary>
+    /// <summary>Whether upstream's format rules / magic resolvers can emit this label.</summary>
     public bool RulesSupport { get; }
 
     public override string ToString() => Label;

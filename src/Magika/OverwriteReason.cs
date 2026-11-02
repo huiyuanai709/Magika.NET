@@ -10,8 +10,13 @@ public enum OverwriteReason
     OverwriteMap,
 
     /// <summary>
-    /// Reserved for upstream format-rule vetoes. This build does not ship the bundled rule engine,
-    /// so identification does not produce this reason.
+    /// A format resolver supplied the label (magic / ZIP subtype / PE) before the model ran.
     /// </summary>
     RulesVeto,
+
+    /// <summary>
+    /// The model predicted a label in upstream <c>resolvers::VETOS</c> but no resolver matched,
+    /// so the result fell back to <c>txt</c> or <c>unknown</c>.
+    /// </summary>
+    ResolversVeto,
 }
