@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Buffers.Binary;
-using System.IO.Compression;
 using System.Runtime.CompilerServices;
 
 namespace Magika.Resolvers;
@@ -412,35 +411,21 @@ internal static class ZipFacts
         bool complete;
         if (deflated)
         {
-            // Raw DEFLATE (RFC 1951), matching miniz TINFL non-wrapping buffer.
-            byte[]? rented = null;
-            try
-            {
-                rented = ArrayPool<byte>.Shared.Rent(data.Length);
-                data.CopyTo(rented);
-                using var ms = new MemoryStream(rented, 0, data.Length, writable: false, publiclyVisible: true);
-                using var ds = new DeflateStream(ms, CompressionMode.Decompress, leaveOpen: true);
-                written = ds.Read(space);
-                if (written == space.Length)
-                {
-                    flags |= FlagFirstEntryFilled;
-                    return FirstEntryBytes;
-                }
-
-                complete = true;
-            }
-            catch
+            // Managed raw DEFLATE (RFC 1951). Avoid System.IO.Compression / zlib-ng so
+            // Native AOT avx2 SKUs stay free of AVX-512 kernels linked for DeflateStream.
+            if (!RawDeflate.TryInflate(data, space, out written))
             {
                 flags |= FlagFirstEntryUndecodable;
                 return head;
             }
-            finally
+
+            if (written == space.Length)
             {
-                if (rented is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
+                flags |= FlagFirstEntryFilled;
+                return FirstEntryBytes;
             }
+
+            complete = true;
         }
         else
         {
