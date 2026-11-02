@@ -401,6 +401,14 @@ public class MagikaTests
 
             string expectedLabel = spec.GetProperty("label").GetString()!;
             float expectedScore = spec.GetProperty("score").GetSingle();
+            if (result.OverwriteReason == OverwriteReason.RulesVeto)
+            {
+                // Format resolvers short-circuit before the model (upstream content.rs).
+                Assert.Equal(expectedLabel, result.ContentType.Label);
+                Assert.Equal(1f, result.Score);
+                continue;
+            }
+
             Assert.Equal(expectedLabel, result.ModelContentType!.Label);
             // Linux stays within 0.001 of the ONNX Runtime reference. Windows gets 0.08:
             // the observed text-fixture gap on windows-latest was 0.052, and that runner's

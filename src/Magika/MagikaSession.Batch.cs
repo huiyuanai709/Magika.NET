@@ -3,6 +3,8 @@ using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Win32.SafeHandles;
 
+using Magika.Resolvers;
+
 namespace Magika;
 
 public sealed partial class MagikaSession
@@ -577,9 +579,9 @@ public sealed partial class MagikaSession
 
             int block = blockSize;
             using ContentEnds.Window head = ContentEnds.ReadAt(handle, offset: 0, block);
-            if (TryMsixFromHandle(handle, head.Prefix, length, path) is MagikaResult msix)
+            if (TryResolveFromHandle(handle, head.Prefix, length, path) is MagikaResult resolved)
             {
-                return Prepared.Done(msix);
+                return Prepared.Done(resolved);
             }
 
             if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
@@ -628,9 +630,9 @@ public sealed partial class MagikaSession
 
             int block = blockSize;
             using ContentEnds.Lease head = await ContentEnds.ReadAtAsync(handle, offset: 0, block, length, cancellationToken).ConfigureAwait(false);
-            if (await TryMsixFromHandleAsync(handle, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult msix)
+            if (await TryResolveFromHandleAsync(handle, head.Prefix.ToArray(), length, path, cancellationToken).ConfigureAwait(false) is MagikaResult resolved)
             {
-                return Prepared.Done(msix);
+                return Prepared.Done(resolved);
             }
 
             if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(head.Prefix, _model))
@@ -649,9 +651,9 @@ public sealed partial class MagikaSession
 
     private Prepared FromEnds(string path, ReadOnlySpan<byte> prefix, ReadOnlySpan<byte> suffix, long length, Span<ushort> features)
     {
-        if (TryMsixWithEnds(prefix, suffix, length, path) is MagikaResult msix)
+        if (TryResolveWithEnds(prefix, suffix, length, path) is MagikaResult resolved)
         {
-            return Prepared.Done(msix);
+            return Prepared.Done(resolved);
         }
 
         if (!_options.UseModel || !FeatureExtractor.HasModelPrefix(prefix, _model))

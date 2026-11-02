@@ -10,9 +10,13 @@ public enum OverwriteReason
     OverwriteMap,
 
     /// <summary>
-    /// A format resolver overwrote or supplied the label.
-    /// Magika.NET currently ships the upstream ZIP→MSIX central-directory check
-    /// (<c>AppxManifest.xml</c> + <c>AppxBlockMap.xml</c>); other rule-only labels stay catalogued only.
+    /// A format resolver supplied the label (magic / ZIP subtype / PE) before the model ran.
     /// </summary>
     RulesVeto,
+
+    /// <summary>
+    /// The model predicted a label in upstream <c>resolvers::VETOS</c> but no resolver matched,
+    /// so the result fell back to <c>txt</c> or <c>unknown</c>.
+    /// </summary>
+    ResolversVeto,
 }

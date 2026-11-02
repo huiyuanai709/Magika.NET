@@ -1,3 +1,5 @@
+using Magika.Resolvers;
+
 namespace Magika;
 
 internal readonly struct ModelDecision
@@ -47,6 +49,13 @@ internal static class PostProcessor
         {
             label = ContentTypes.Get(mapped).IsText ? "txt" : "unknown";
             reason = OverwriteReason.LowConfidence;
+        }
+        else if (ResolverVetos.Contains(mapped))
+        {
+            // Upstream: resolvers have no false negatives for VETOS labels. A model hit without
+            // a prior resolver match is vetoed to txt/unknown.
+            label = ContentTypes.Get(mapped).IsText ? "txt" : "unknown";
+            reason = OverwriteReason.ResolversVeto;
         }
         else
         {
