@@ -28,3 +28,11 @@ Native AOT release builds of `Magika.Cli` publish with Satori GC through the `Pu
 - License: Apache License, Version 2.0
 
 No SimdPaddleOCR source, package, or native binary is vendored in this repository. Magika.NET's ONNX interpreter and GEMM are original code. The design follows that project's approach: a pure C# ONNX interpreter with handwritten CPU kernels, and no dependency on ONNX Runtime or Paddle Inference. SimdPaddleOCR's interpreter is built for OCR graphs and does not implement operators this model needs (`Equal`, `Cast`, `Shape`, `Expand`, `Reciprocal`, `GlobalMaxPool`), so the stack was not reused as a package or a source fork.
+
+## sdefl / sinfl (RawDeflate)
+
+- Project: https://github.com/fxfactorial/sdefl
+- License: MIT License or public domain (Unlicense); Magika.NET uses the MIT terms
+- Copyright: Copyright (c) 2020 Micha Mettke
+
+`src/Magika/Resolvers/RawDeflate.cs` is a C# port of the `sinfl` raw DEFLATE inflater. It is used instead of `System.IO.Compression.DeflateStream` so Native AOT AVX2 release binaries do not link zlib-ng's AVX-512 object code.
