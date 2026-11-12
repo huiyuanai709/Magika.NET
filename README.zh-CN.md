@@ -93,7 +93,7 @@ dotnet run --project src/Magika.Cli -c Release -- --batch-size 4 --workers 2 ./f
 
 ## 开发
 
-需要 .NET 11 SDK。`global.json` 选择 11.0 预览通道，并允许向前滚动。
+需要 .NET 11 SDK。`global.json` 钉在 `11.0.100`，并允许在 11.0 功能带内向前滚动（`latestFeature`）。
 
 ```bash
 dotnet test Magika.slnx -c Release
