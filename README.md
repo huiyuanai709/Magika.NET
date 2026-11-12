@@ -93,7 +93,7 @@ Those Native AOT binaries use [Satori GC](https://www.nuget.org/packages/Publish
 
 ## Development
 
-The SDK is .NET 11. `global.json` selects the 11.0 preview channel and allows roll-forward.
+The SDK is .NET 11. `global.json` pins `11.0.100` and allows roll-forward within the 11.0 feature band (`latestFeature`).
 
 ```bash
 dotnet test Magika.slnx -c Release

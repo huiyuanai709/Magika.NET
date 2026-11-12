@@ -21,6 +21,5 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
-          dotnet-quality: preview
       - name: Test
         run: dotnet test Magika.slnx -c Release --nologo
